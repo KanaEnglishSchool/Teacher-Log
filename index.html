@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teacher Log</title>
+    
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    </head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+
+        // 👑 STEP 3: PASTE YOUR ENTIRE REACT CODE DIRECTLY BELOW THIS LINE!
+        import { useState, useEffect } from "react";
+
+        // ─────────────────────────────────────────────────────────────────────────────
+        // KANA Daily Log v4
+        // Weekly schedule templates: set up Mon/Tue/Wed etc once → auto-loads every week
+        // Dark utilitarian aesthetic — staff room notice board meets modern dashboard
+        // ─────────────────────────────────────────────────────────────────────────────
+        
+        const C = {
+          bg:          "#0F1923",
+          surface:     "#16232F",
+          card:        "#1C2E3D",
+          cardHover:   "#223648",
+          border:      "#2A3D50",
+          borderBright:"#3A5168",
+          amber:       "#F59E0B",
+          amberDim:    "#92600A",
+          amberLight:  "#FEF3C7",
+          green:       "#10B981",
+          greenDim:    "#065F46",
+          greenLight:  "#D1FAE5",
+          coral:       "#F43F5E",
+          coralDim:    "#881337",
+          coralLight:  "#FFE4E6",
+          blue:        "#3B82F6",
+          blueLight:   "#DBEAFE",
+          purple:      "#8B5CF6",
+          purpleDim:   "#4C1D95",
+          muted:       "#64748B",
+          mutedBright: "#94A3B8",
+          text:        "#E2E8F0",
+          textDim:     "#94A3B8",
+          white:       "#FFFFFF",
+        };
+        
+        const SERIF = "'Playfair Display', Georgia, serif";
+        const MONO  = "'DM Mono', 'Courier New', monospace";
+        const BODY  = "'Outfit', system-ui, sans-serif";
+        
+        const MOODS       = ["😄 Excellent","🙂 Good","😐 Neutral","😕 Low","😤 Difficult"];
+        const ENGAGEMENT  = ["🔥 Highly engaged","✅ Engaged","😐 Mixed","😴 Low engagement","📵 Disengaged"];
+        const PERFORMANCE = ["⭐ Exceeded goals","✅ Met goals","〜 Partially met","❌ Below goals","🚫 No lesson goals set"];
+        
+        const DAYS = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+        const SLOT_TIMES = [
+          "9:00 AM","10:00 AM","11:00 AM","12:00 PM",
+          "1:00 PM","2:00 PM","3:00 PM","4:00 PM",
+        ];
+        
+        const css = `
+          @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700&display=swap');
+          *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+          body { background: ${C.bg}; font-family: ${BODY}; color: ${C.text}; line-height: 1.5; }
+          input, textarea, select, button { font-family: ${BODY}; }
+          textarea { resize: vertical; }
+          ::-webkit-scrollbar { width: 4px; }
+          ::-webkit-scrollbar-track { background: ${C.surface}; }
+          ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 2px; }
+          @keyframes slideUp  { from { opacity:0; transform:translateY(14px); } to { opacity:1; transform:translateY(0); } }
+          @keyframes fadeIn   { from { opacity:0; } to { opacity:1; } }
+          .slide-up { animation: slideUp .22s ease forwards; }
+          .fade-in  { animation: fadeIn .15s ease forwards; }
+          select option { background: ${C.card}; color: ${C.text}; }
+        `;
+        
+        // ── Helpers ──────────────────────────────────────────────────────────────────
+        const uid       = () => Math.random().toString(36).slice(2, 9);
+        const todayStr  = () => new Date().toISOString().slice(0, 10);
+        const dowOf     = (d) => new Date(d + "T12:00:00").getDay(); // 0=Sun … 6=Sat
+        const dayName   = (d) => DAYS[dowOf(d)];
+        const fmtDay    = (d) => new Date(d + "T12:00:00").toLocaleDateString("en-GB", {
+          weekday:"long", day:"numeric", month:"long", year:"numeric"
+        });
+        const addDays   = (d, n) => {
+          const dt = new Date(d + "T12:00:00"); dt.setDate(dt.getDate() + n);
+          return dt.toISOString().slice(0, 10);
+        };
+        
+        // ── Default schedule template ─────────────────────────────────────────────────
+        const buildTemplate = () =>
+          SLOT_TIMES.map((time, i) => ({ id: `slot_${i}`, time, className: "", studentNames: [] }));
+        
+        const buildWeekTemplates = () =>
+          Object.fromEntries(DAYS.map(d => [d, buildTemplate()]));
+        
+        // ── Storage ───────────────────────────────────────────────────────────────────
+        const STORE = "kana_v4";
+        async function loadData() {
+          try {
+            const r = await window.storage.get(STORE);
+            if (r) return JSON.parse(r.value);
+          } catch {}
+          return { weekTemplates: buildWeekTemplates(), reports: {} };
+        }
+        async function saveData(d) {
+          try { await window.storage.set(STORE, JSON.stringify(d)); } catch (e) { console.error(e); }
+        }
+        
+        // ── Primitive UI ──────────────────────────────────────────────────────────────
+        const Btn = ({ children, onClick, variant = "primary", small, disabled, full, style: s = {} }) => {
+          const variants = {
+            primary: { bg: C.amber,      col: "#000",    bdr: "none" },
+            ghost:   { bg: "transparent",col: C.text,    bdr: `1px solid ${C.border}` },
+            danger:  { bg: C.coralDim,   col: C.coral,   bdr: `1px solid ${C.coral}` },
+            green:   { bg: C.greenDim,   col: C.green,   bdr: `1px solid ${C.green}` },
+            purple:  { bg: C.purpleDim,  col: C.purple,  bdr: `1px solid ${C.purple}` },
+            dim:     { bg: C.surface,    col: C.textDim, bdr: `1px solid ${C.border}` },
+          }[variant] || {};
+          return (
+            <button onClick={onClick} disabled={disabled} style={{
+              background: variants.bg, color: variants.col, border: variants.bdr,
+              borderRadius: 7, padding: small ? "5px 12px" : "9px 18px",
+              fontSize: small ? 12 : 14, fontWeight: 600, letterSpacing: .3,
+              opacity: disabled ? .4 : 1, cursor: disabled ? "not-allowed" : "pointer",
+              width: full ? "100%" : undefined, transition: "opacity .15s", ...s,
+            }}
+              onMouseEnter={e => { if (!disabled) e.currentTarget.style.opacity = ".8"; }}
+              onMouseLeave={e => { e.currentTarget.style.opacity = disabled ? ".4" : "1"; }}
+            >{children}</button>
+          );
+        };
+        
+        const FieldLabel = ({ children, hint }) => (
+          <div style={{ marginBottom: 6 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 1 }}>{children}</span>
+            {hint && <span style={{ fontSize: 11, color: C.muted, marginLeft: 6 }}>— {hint}</span>}
+          </div>
+        );
+        
+        const DarkSelect = ({ label, hint, value, onChange, options }) => (
+          <div>
+            {label && <FieldLabel hint={hint}>{label}</FieldLabel>}
+            <select value={value} onChange={e => onChange(e.target.value)} style={{
+              width: "100%", background: C.bg, border: `1px solid ${C.border}`,
+              borderRadius: 7, padding: "9px 12px", fontSize: 14, color: C.text, outline: "none",
+            }}
+              onFocus={e => e.target.style.borderColor = C.amber}
+              onBlur={e => e.target.style.borderColor = C.border}>
+              {options.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </div>
+        );
+        
+        const DarkInput = ({ label, value, onChange, placeholder, type = "text" }) => (
+          <div>
+            {label && <FieldLabel>{label}</FieldLabel>}
+            <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+              style={{ width: "100%", background: C.bg, border: `1px solid ${C.border}`,
+                borderRadius: 7, padding: "9px 12px", fontSize: 14, color: C.text, outline: "none" }}
+              onFocus={e => e.target.style.borderColor = C.amber}
+              onBlur={e => e.target.style.borderColor = C.border} />
+          </div>
+        );
+        
+        // ── Student Mark Row ──────────────────────────────────────────────────────────
+        function StudentMark({ name, mark, onChange }) {
+          const cfg = {
+            positive: { icon: "✓", bg: C.greenDim,  col: C.green, border: C.green },
+            negative: { icon: "✗", bg: C.coralDim,  col: C.coral, border: C.coral },
+            flag:     { icon: "🚩",bg: "#3D2800",   col: C.amber, border: C.amber },
+            none:     { icon: null, bg: "transparent",col: C.muted, border: C.border },
+          };
+          const toggle = (type) => onChange(mark === type ? "none" : type);
+          const active = cfg[mark] || cfg.none;
+        
+          return (
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "7px 11px", borderRadius: 8, background: C.bg,
+              border: `1px solid ${mark !== "none" ? active.border : C.border}`,
+              transition: "border-color .15s",
+            }}>
+              <span style={{ fontSize: 14, fontWeight: 500, color: mark !== "none" ? active.col : C.text }}>
+                {name}
+              </span>
+              <div style={{ display: "flex", gap: 5 }}>
+                {[
+                  { type: "positive", icon: "✓", title: "Positive" },
+                  { type: "negative", icon: "✗", title: "Concern"  },
+                  { type: "flag",     icon: "🚩",title: "Flag"     },
+                ].map(({ type, icon, title }) => {
+                  const isActive = mark === type;
+                  const mc = cfg[type];
+                  return (
+                    <button key={type} title={title} onClick={() => toggle(type)} style={{
+                      width: 30, height: 30, borderRadius: 6, fontSize: 13, fontWeight: 700,
+                      border: `1px solid ${isActive ? mc.border : C.border}`,
+                      background: isActive ? mc.bg : "transparent",
+                      color: isActive ? mc.col : C.muted, cursor: "pointer", transition: "all .12s",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}
+                      onMouseEnter={e => { if (!isActive) { e.currentTarget.style.borderColor = mc.border; e.currentTarget.style.color = mc.col; }}}
+                      onMouseLeave={e => { if (!isActive) { e.currentTarget.style.borderColor = C.border;  e.currentTarget.style.color = C.muted; }}}
+                    >{icon}</button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        }
+        
+        // ── Class Report Modal ─────────────────────────────────────────────────────────
+        function ReportModal({ slot, existing, onSave, onClose }) {
+          const [mood,        setMood]        = useState(existing?.mood        || MOODS[1]);
+          const [engagement,  setEngagement]  = useState(existing?.engagement  || ENGAGEMENT[1]);
+          const [performance, setPerformance] = useState(existing?.performance || PERFORMANCE[1]);
+          const [note,        setNote]        = useState(existing?.note        || "");
+          const [marks,       setMarks]       = useState(existing?.marks       || {});
+        
+          const setMark = (name, m) => setMarks(prev => ({ ...prev, [name]: m }));
+          const getMark = (name)    => marks[name] || "none";
+        
+          const counts = {
+            pos: slot.studentNames.filter(n => getMark(n) === "positive").length,
+            neg: slot.studentNames.filter(n => getMark(n) === "negative").length,
+            fl:  slot.studentNames.filter(n => getMark(n) === "flag").length,
+          };
+        
+          return (
+            <div className="fade-in" style={{
+              position: "fixed", inset: 0, background: "rgba(0,0,0,.78)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              zIndex: 1000, padding: 16, overflowY: "auto",
+            }} onClick={e => e.target === e.currentTarget && onClose()}>
+              <div className="slide-up" style={{
+                background: C.surface, border: `1px solid ${C.borderBright}`,
+                borderRadius: 14, width: "100%", maxWidth: 520,
+                maxHeight: "92vh", overflowY: "auto", padding: 24,
+              }}>
+                {/* header */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
+                  <div>
+                    <p style={{ fontFamily: MONO, fontSize: 11, color: C.amber, letterSpacing: 2, marginBottom: 4 }}>{slot.time}</p>
+                    <h2 style={{ fontFamily: SERIF, fontSize: 22, color: C.white }}>{slot.className || "Unnamed Class"}</h2>
+                    <p style={{ fontSize: 13, color: C.muted, marginTop: 3 }}>{slot.studentNames.length} student{slot.studentNames.length !== 1 ? "s" : ""}</p>
+                  </div>
+                  <button onClick={onClose} style={{ background:"none", border:"none", color:C.muted, fontSize:22, cursor:"pointer", padding:4 }}>×</button>
+                </div>
+        
+                {/* 3 questions */}
+                <div style={{ background: C.card, borderRadius: 10, padding: 16, marginBottom: 20, display: "grid", gap: 14 }}>
+                  <p style={{ fontFamily: MONO, fontSize: 10, color: C.amber, letterSpacing: 2, textTransform: "uppercase" }}>Class Rating</p>
+                  <DarkSelect label="1. General class mood / attitude"    value={mood}        onChange={setMood}        options={MOODS}       />
+                  <DarkSelect label="2. How engaged were the students?"   value={engagement}  onChange={setEngagement}  options={ENGAGEMENT}  />
+                  <DarkSelect label="3. Performance vs lesson goals"      value={performance} onChange={setPerformance} options={PERFORMANCE} />
+                </div>
+        
+                {/* student marks */}
+                {slot.studentNames.length > 0 && (
+                  <div style={{ marginBottom: 20 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <FieldLabel>Student marks</FieldLabel>
+                      <div style={{ display: "flex", gap: 10, fontSize: 12 }}>
+                        {counts.pos > 0 && <span style={{ color: C.green,  fontWeight: 700 }}>✓ {counts.pos}</span>}
+                        {counts.neg > 0 && <span style={{ color: C.coral,  fontWeight: 700 }}>✗ {counts.neg}</span>}
+                        {counts.fl  > 0 && <span style={{ color: C.amber,  fontWeight: 700 }}>🚩 {counts.fl}</span>}
+                      </div>
+                    </div>
+                    <p style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>Only mark students worth noting. Unmarked = fine.</p>
+                    <div style={{ display: "grid", gap: 6 }}>
+                      {slot.studentNames.map(name => (
+                        <StudentMark key={name} name={name} mark={getMark(name)} onChange={m => setMark(name, m)} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+        
+                {/* note */}
+                <div style={{ marginBottom: 20 }}>
+                  <FieldLabel hint="optional">Teacher note</FieldLabel>
+                  <textarea value={note} onChange={e => setNote(e.target.value)} rows={2}
+                    placeholder="Anything else worth recording..."
+                    style={{ width:"100%", background:C.bg, border:`1px solid ${C.border}`, borderRadius:7,
+                      padding:"9px 12px", fontSize:13, color:C.text, outline:"none", lineHeight:1.6 }}
+                    onFocus={e => e.target.style.borderColor = C.amber}
+                    onBlur={e => e.target.style.borderColor = C.border} />
+                </div>
+        
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+                  <Btn variant="primary" onClick={() => { onSave({ mood, engagement, performance, note, marks, savedAt: new Date().toISOString() }); onClose(); }}>
+                    Save Report
+                  </Btn>
+                </div>
+              </div>
+            </div>
+          );
+        }
+        
+        // ── Slot Editor (in template builder) ────────────────────────────────────────
+        function SlotEditorModal({ slot, dayName, onSave, onClose }) {
+          const [className,   setClassName]   = useState(slot.className || "");
+          const [studentText, setStudentText] = useState((slot.studentNames || []).join("\n"));
+        
+          const save = () => {
+            const names = studentText.split("\n").map(s => s.trim()).filter(Boolean);
+            onSave({ className, studentNames: names });
+            onClose();
+          };
+        
+          return (
+            <div className="fade-in" style={{
+              position:"fixed", inset:0, background:"rgba(0,0,0,.78)",
+              display:"flex", alignItems:"center", justifyContent:"center",
+              zIndex:1002, padding:16,
+            }} onClick={e => e.target === e.currentTarget && onClose()}>
+              <div className="slide-up" style={{
+                background:C.surface, border:`1px solid ${C.borderBright}`,
+                borderRadius:14, width:"100%", maxWidth:400, padding:24,
+              }}>
+                <div style={{ display:"flex", justifyContent:"space-between", marginBottom:18 }}>
+                  <div>
+                    <p style={{ fontFamily:MONO, fontSize:10, color:C.purple, letterSpacing:2, marginBottom:4 }}>
+                      {dayName} · {slot.time}
+                    </p>
+                    <h3 style={{ fontFamily:SERIF, fontSize:20, color:C.white }}>Edit Slot</h3>
+                  </div>
+                  <button onClick={onClose} style={{ background:"none", border:"none", color:C.muted, fontSize:20, cursor:"pointer" }}>×</button>
+                </div>
+                <div style={{ display:"grid", gap:16 }}>
+                  <DarkInput label="Class name" value={className} onChange={setClassName} placeholder="e.g. Kids Tuesday 4pm" />
+                  <div>
+                    <FieldLabel hint="one name per line">Student names</FieldLabel>
+                    <textarea value={studentText} onChange={e => setStudentText(e.target.value)}
+                      placeholder={"Yuki\nHaruto\nAika\nKenta"} rows={9}
+                      style={{ width:"100%", background:C.bg, border:`1px solid ${C.border}`,
+                        borderRadius:7, padding:"9px 12px", fontSize:14, color:C.text,
+                        outline:"none", lineHeight:1.8, fontFamily:MONO }}
+                      onFocus={e => e.target.style.borderColor = C.purple}
+                      onBlur={e => e.target.style.borderColor = C.border} />
+                  </div>
+                  <div style={{ display:"flex", gap:10, justifyContent:"flex-end" }}>
+                    <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+                    <Btn variant="primary" onClick={save}>Save</Btn>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        }
+        
+        // ── Weekly Template Builder ────────────────────────────────────────────────────
+        function TemplateBuilder({ weekTemplates, onSave, onClose }) {
+          const [templates, setTemplates] = useState(JSON.parse(JSON.stringify(weekTemplates)));
+          const [activeDay, setActiveDay] = useState("Monday");
+          const [editingSlot, setEditingSlot] = useState(null);
+        
+          const updateSlot = (day, slotId, updates) => {
+            setTemplates(prev => ({
+              ...prev,
+              [day]: prev[day].map(s => s.id === slotId ? { ...s, ...updates } : s),
+            }));
+          };
+        
+          const copyDay = (fromDay, toDay) => {
+            setTemplates(prev => ({
+              ...prev,
+              [toDay]: prev[fromDay].map(s => ({ ...s, id: s.id })),
+            }));
+          };
+        
+          const slots = templates[activeDay] || [];
+        
+          return (
+            <div className="fade-in" style={{
+              position:"fixed", inset:0, background:"rgba(0,0,0,.85)",
+              display:"flex", alignItems:"center", justifyContent:"center",
+              zIndex:1001, padding:16, overflowY:"auto",
+            }}>
+              {editingSlot && (
+                <SlotEditorModal
+                  slot={editingSlot.slot}
+                  dayName={editingSlot.day}
+                  onSave={(updates) => { updateSlot(editingSlot.day, editingSlot.slot.id, updates); setEditingSlot(null); }}
+                  onClose={() => setEditingSlot(null)}
+                />
+              )}
+        
+              <div className="slide-up" style={{
+                background:C.surface, border:`1px solid ${C.borderBright}`,
+                borderRadius:16, width:"100%", maxWidth:680,
+                maxHeight:"94vh", overflowY:"auto", padding:28,
+              }}>
+                {/* header */}
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:22 }}>
+                  <div>
+                    <p style={{ fontFamily:MONO, fontSize:10, color:C.purple, letterSpacing:2, marginBottom:4 }}>WEEKLY SCHEDULE</p>
+                    <h2 style={{ fontFamily:SERIF, fontSize:24, color:C.white }}>Template Builder</h2>
+                    <p style={{ fontSize:13, color:C.muted, marginTop:4 }}>
+                      Set up each day once — it auto-loads every week.
+                    </p>
+                  </div>
+                  <button onClick={onClose} style={{ background:"none", border:"none", color:C.muted, fontSize:22, cursor:"pointer", padding:4 }}>×</button>
+                </div>
+        
+                {/* day tabs */}
+                <div style={{ display:"flex", gap:6, marginBottom:20, flexWrap:"wrap" }}>
+                  {DAYS.map(d => {
+                    const filled = (templates[d] || []).filter(s => s.className).length;
+                    const isActive = activeDay === d;
+                    return (
+                      <button key={d} onClick={() => setActiveDay(d)} style={{
+                        padding:"6px 14px", borderRadius:8, border:`1px solid ${isActive ? C.purple : C.border}`,
+                        background: isActive ? C.purpleDim : "transparent",
+                        color: isActive ? C.purple : C.textDim,
+                        fontSize:13, fontWeight:700, cursor:"pointer", transition:"all .15s",
+                        position:"relative",
+                      }}>
+                        {d.slice(0, 3)}
+                        {filled > 0 && (
+                          <span style={{
+                            position:"absolute", top:-6, right:-6,
+                            background:C.purple, color:"#fff",
+                            width:16, height:16, borderRadius:"50%", fontSize:9,
+                            display:"flex", alignItems:"center", justifyContent:"center", fontWeight:700,
+                          }}>{filled}</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+        
+                {/* copy from another day */}
+                <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:18, padding:"10px 14px", background:C.card, borderRadius:9 }}>
+                  <span style={{ fontSize:12, color:C.muted, flex:1 }}>Copy schedule from another day into {activeDay}:</span>
+                  <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                    {DAYS.filter(d => d !== activeDay).map(d => (
+                      <Btn key={d} variant="dim" small onClick={() => {
+                        if (window.confirm("Copy " + d + "'s schedule into " + activeDay + "? This will overwrite " + activeDay + ".")) copyDay(d, activeDay);
+                      }}>{d.slice(0,3)}</Btn>
+                    ))}
+                  </div>
+                </div>
+        
+                {/* slot list for active day */}
+                <div style={{ display:"grid", gap:8 }}>
+                  {slots.map(slot => {
+                    const hasClass = !!slot.className;
+                    return (
+                      <div key={slot.id} style={{
+                        display:"flex", alignItems:"center", gap:12, padding:"11px 14px",
+                        background:C.card, borderRadius:9,
+                        border:`1px solid ${hasClass ? C.borderBright : C.border}`,
+                        borderLeft:`3px solid ${hasClass ? C.purple : C.border}`,
+                      }}>
+                        <span style={{ fontFamily:MONO, fontSize:12, color:C.amber, minWidth:65, letterSpacing:.5 }}>{slot.time}</span>
+                        <div style={{ flex:1 }}>
+                          {hasClass ? (
+                            <>
+                              <p style={{ fontWeight:700, fontSize:14, color:C.white }}>{slot.className}</p>
+                              <p style={{ fontSize:12, color:C.muted, marginTop:2 }}>
+                                {slot.studentNames.length} student{slot.studentNames.length !== 1 ? "s" : ""}
+                                {slot.studentNames.length > 0 && (
+                                  <span style={{ color:C.textDim }}>
+                                    {" "}· {slot.studentNames.slice(0,3).join(", ")}{slot.studentNames.length > 3 ? ` +${slot.studentNames.length - 3}` : ""}
+                                  </span>
+                                )}
+                              </p>
+                            </>
+                          ) : (
+                            <p style={{ fontSize:13, color:C.muted, fontStyle:"italic" }}>No class</p>
+                          )}
+                        </div>
+                        <div style={{ display:"flex", gap:6 }}>
+                          <Btn variant="dim" small onClick={() => setEditingSlot({ slot, day: activeDay })}>
+                            {hasClass ? "Edit" : "+ Add"}
+                          </Btn>
+                          {hasClass && (
+                            <Btn variant="danger" small onClick={() => updateSlot(activeDay, slot.id, { className:"", studentNames:[] })}>
+                              Clear
+                            </Btn>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+        
+                {/* save */}
+                <div style={{ display:"flex", gap:10, justifyContent:"flex-end", marginTop:24 }}>
+                  <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+                  <Btn variant="purple" onClick={() => { onSave(templates); onClose(); }}
+                    style={{ background:C.purple, color:"#fff", border:"none" }}>
+                    Save Weekly Schedule
+                  </Btn>
+                </div>
+              </div>
+            </div>
+          );
+        }
+        
+        // ── Slot Card (daily view) ────────────────────────────────────────────────────
+        function SlotCard({ slot, report, onLog, onEditTemplate }) {
+          const isEmpty  = !slot.className;
+          const hasReport = !!report;
+        
+          const counts = hasReport ? {
+            pos: Object.values(report.marks || {}).filter(m => m === "positive").length,
+            neg: Object.values(report.marks || {}).filter(m => m === "negative").length,
+            fl:  Object.values(report.marks || {}).filter(m => m === "flag").length,
+          } : null;
+        
+          return (
+            <div style={{
+              background: hasReport ? C.card : isEmpty ? C.surface : C.card,
+              border:`1px solid ${hasReport ? C.borderBright : C.border}`,
+              borderRadius:11, overflow:"hidden",
+              borderLeft:`3px solid ${hasReport ? C.green : isEmpty ? C.border : C.amber}`,
+            }}>
+              {/* time strip */}
+              <div style={{
+                padding:"5px 12px", display:"flex", justifyContent:"space-between", alignItems:"center",
+                background: hasReport ? C.greenDim : isEmpty ? C.bg : C.amberDim,
+              }}>
+                <span style={{ fontFamily:MONO, fontSize:11, letterSpacing:1.5, fontWeight:600,
+                  color: hasReport ? C.green : isEmpty ? C.muted : C.amber }}>
+                  {slot.time}
+                </span>
+                {hasReport && <span style={{ fontSize:10, color:C.green, fontWeight:700 }}>✓ LOGGED</span>}
+              </div>
+        
+              {/* body */}
+              <div style={{ padding:"12px 14px" }}>
+                {isEmpty ? (
+                  <div style={{ textAlign:"center", padding:"8px 0" }}>
+                    <p style={{ fontSize:12, color:C.muted, marginBottom:8 }}>No class scheduled</p>
+                    <Btn variant="dim" small onClick={onEditTemplate}>Edit template</Btn>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:8 }}>
+                      <div style={{ flex:1 }}>
+                        <h3 style={{ fontSize:14, fontWeight:700, color:C.white, lineHeight:1.3 }}>{slot.className}</h3>
+                        <p style={{ fontSize:12, color:C.muted, marginTop:2 }}>{slot.studentNames.length} student{slot.studentNames.length !== 1 ? "s" : ""}</p>
+                      </div>
+                      <button onClick={onEditTemplate} title="Edit template" style={{ background:"none", border:"none", color:C.muted, fontSize:12, cursor:"pointer", padding:"2px 4px" }}>✎</button>
+                    </div>
+        
+                    {/* student name pills */}
+                    {slot.studentNames.length > 0 && (
+                      <div style={{ display:"flex", flexWrap:"wrap", gap:4, marginBottom:10 }}>
+                        {slot.studentNames.map(name => {
+                          const mark = report?.marks?.[name] || "none";
+                          const mc = {
+                            positive:{ bg:C.greenDim,  col:C.green },
+                            negative:{ bg:C.coralDim,  col:C.coral },
+                            flag:    { bg:"#3D2800",   col:C.amber },
+                            none:    { bg:C.bg,        col:C.textDim },
+                          }[mark];
+                          return (
+                            <span key={name} style={{ padding:"2px 8px", borderRadius:99, fontSize:11, fontWeight:600, background:mc.bg, color:mc.col }}>
+                              {name}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
+        
+                    {/* report summary */}
+                    {hasReport && counts && (
+                      <div style={{ display:"flex", gap:10, marginBottom:10, flexWrap:"wrap", fontSize:12 }}>
+                        <span style={{ color:C.textDim }}>{report.mood.split(" ")[0]} {report.engagement.split(" ")[0]}</span>
+                        {counts.pos > 0 && <span style={{ color:C.green,  fontWeight:700 }}>✓ {counts.pos}</span>}
+                        {counts.neg > 0 && <span style={{ color:C.coral,  fontWeight:700 }}>✗ {counts.neg}</span>}
+                        {counts.fl  > 0 && <span style={{ color:C.amber,  fontWeight:700 }}>🚩 {counts.fl}</span>}
+                      </div>
+                    )}
+        
+                    <Btn variant={hasReport ? "ghost" : "primary"} small full onClick={onLog} style={{ fontSize:12 }}>
+                      {hasReport ? "View / Edit Report" : "Log This Class →"}
+                    </Btn>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        }
+        
+        // ── Date Navigation ───────────────────────────────────────────────────────────
+        function DateNav({ date, onChange }) {
+          const isToday = date === todayStr();
+          return (
+            <div style={{ display:"flex", alignItems:"center", gap:14, flexWrap:"wrap" }}>
+              <button onClick={() => onChange(addDays(date, -1))} style={{
+                background:C.surface, border:`1px solid ${C.border}`, borderRadius:7,
+                padding:"6px 14px", color:C.text, cursor:"pointer", fontSize:18, lineHeight:1,
+              }}>‹</button>
+              <div style={{ textAlign:"center" }}>
+                <p style={{ fontFamily:SERIF, fontSize:20, color:C.white }}>{fmtDay(date)}</p>
+                {isToday && <span style={{ fontFamily:MONO, fontSize:10, color:C.amber, letterSpacing:2 }}>TODAY</span>}
+              </div>
+              <button onClick={() => onChange(addDays(date, 1))} style={{
+                background:C.surface, border:`1px solid ${C.border}`, borderRadius:7,
+                padding:"6px 14px", color:C.text, cursor:"pointer", fontSize:18, lineHeight:1,
+              }}>›</button>
+              {!isToday && (
+                <Btn variant="ghost" small onClick={() => onChange(todayStr())} style={{ borderColor:C.amber, color:C.amber }}>
+                  Today
+                </Btn>
+              )}
+            </div>
+          );
+        }
+        
+        // ── Day Stats Bar ─────────────────────────────────────────────────────────────
+        function DayStats({ slots, dayReports }) {
+          const active = slots.filter(s => s.className);
+          const logged = active.filter(s => dayReports[s.id]).length;
+          const allMarks = active.flatMap(s => Object.values(dayReports[s.id]?.marks || {}));
+          const pos = allMarks.filter(m => m === "positive").length;
+          const neg = allMarks.filter(m => m === "negative").length;
+          const fl  = allMarks.filter(m => m === "flag").length;
+        
+          if (!active.length) return null;
+        
+          return (
+            <div style={{ display:"flex", gap:16, flexWrap:"wrap", alignItems:"center" }}>
+              <span style={{ fontFamily:MONO, fontSize:12, color: logged === active.length ? C.green : C.amber }}>
+                {logged}/{active.length} logged
+              </span>
+              {pos > 0 && <span style={{ fontSize:12, color:C.green,  fontWeight:700 }}>✓ {pos}</span>}
+              {neg > 0 && <span style={{ fontSize:12, color:C.coral,  fontWeight:700 }}>✗ {neg}</span>}
+              {fl  > 0 && <span style={{ fontSize:12, color:C.amber,  fontWeight:700 }}>🚩 {fl}</span>}
+            </div>
+          );
+        }
+        
+        // ── MAIN APP ──────────────────────────────────────────────────────────────────
+        export default function App() {
+          const [data,          setData]          = useState(null);
+          const [date,          setDate]          = useState(todayStr());
+          const [reportSlot,    setReportSlot]    = useState(null);
+          const [showTemplate,  setShowTemplate]  = useState(false);
+          const [templateDay,   setTemplateDay]   = useState(null); // jump to specific day in builder
+        
+          useEffect(() => { loadData().then(setData); }, []);
+        
+          const persist = (next) => { setData(next); saveData(next); };
+        
+          if (!data) return (
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100vh", background:C.bg }}>
+              <p style={{ color:C.muted, fontFamily:BODY }}>Loading...</p>
+            </div>
+          );
+        
+          // Get today's day name → look up template for that day
+          const dow        = dayName(date);                              // e.g. "Tuesday"
+          const slots      = (data.weekTemplates || buildWeekTemplates())[dow] || buildTemplate();
+          const reports    = data.reports || {};
+          const reportKey  = (slotId) => `${date}_${slotId}`;
+          const dayReports = Object.fromEntries(slots.map(s => [s.id, reports[reportKey(s.id)]]));
+        
+          const saveReport = (slot, report) => {
+            persist({ ...data, reports: { ...reports, [reportKey(slot.id)]: report } });
+          };
+        
+          const saveTemplates = (newTemplates) => {
+            persist({ ...data, weekTemplates: newTemplates });
+          };
+        
+          const openTemplateBuilder = (focusDay) => {
+            setTemplateDay(focusDay || dow);
+            setShowTemplate(true);
+          };
+        
+          return (
+            <>
+              <style>{css}</style>
+        
+              {reportSlot && (
+                <ReportModal
+                  slot={reportSlot}
+                  existing={dayReports[reportSlot.id]}
+                  onSave={r => saveReport(reportSlot, r)}
+                  onClose={() => setReportSlot(null)}
+                />
+              )}
+        
+              {showTemplate && (
+                <TemplateBuilder
+                  weekTemplates={data.weekTemplates || buildWeekTemplates()}
+                  onSave={saveTemplates}
+                  onClose={() => setShowTemplate(false)}
+                />
+              )}
+        
+              <div style={{ maxWidth:920, margin:"0 auto", padding:"24px 16px 48px", minHeight:"100vh" }}>
+        
+                {/* ── HEADER ── */}
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:24, flexWrap:"wrap", gap:12 }}>
+                  <h1 style={{ fontFamily:SERIF, fontSize:26, color:C.white }}>
+                    KANA <span style={{ color:C.amber }}>Daily Log</span>
+                  </h1>
+                  <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+                    <DayStats slots={slots} dayReports={dayReports} />
+                    <Btn variant="purple" small onClick={() => openTemplateBuilder()} style={{ background:C.purpleDim, color:C.purple, border:`1px solid ${C.purple}` }}>
+                      ⚙ Weekly Schedule
+                    </Btn>
+                  </div>
+                </div>
+        
+                {/* ── DATE NAV ── */}
+                <div style={{ marginBottom:22 }}>
+                  <DateNav date={date} onChange={setDate} />
+                </div>
+        
+                {/* ── DAY LABEL ── */}
+                <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:18 }}>
+                  <p style={{ fontFamily:MONO, fontSize:11, color:C.purple, letterSpacing:2, textTransform:"uppercase" }}>
+                    {dow} Schedule
+                  </p>
+                  <button onClick={() => openTemplateBuilder(dow)} style={{
+                    background:"none", border:`1px solid ${C.border}`, borderRadius:6,
+                    padding:"3px 10px", color:C.muted, fontSize:11, cursor:"pointer",
+                  }}>Edit {dow}</button>
+                </div>
+        
+                {/* ── 8-SLOT GRID ── */}
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(260px, 1fr))", gap:12 }}>
+                  {slots.map(slot => (
+                    <SlotCard
+                      key={slot.id}
+                      slot={slot}
+                      report={dayReports[slot.id]}
+                      onLog={() => setReportSlot(slot)}
+                      onEditTemplate={() => openTemplateBuilder(dow)}
+                    />
+                  ))}
+                </div>
+        
+                <p style={{ textAlign:"center", color:C.muted, fontSize:11, marginTop:28, fontFamily:MONO, letterSpacing:.5 }}>
+                  Weekly templates auto-load per day · Reports saved per date
+                </p>
+              </div>
+            </>
+          );
+        }
+
+
+
+        // ================================================================
+        // STEP 4: This connects your React code to the "root" div above
+        // (Change 'App' to whatever your main function component is called)
+        const container = document.getElementById('root');
+        const root = ReactDOM.createRoot(container);
+        root.render(<App />);
+    </script>
+</body>
+</html>
