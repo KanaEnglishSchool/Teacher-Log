@@ -53,13 +53,17 @@ const PERFORMANCE = ["⭐ Exceeded goals","✅ Met goals","〜 Partially met","�
 
 const DAYS = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
 
-// Different slot times per day
-// Mon–Fri + Sun: 13:00–20:00 (8 slots)
-// Saturday: 09:00–16:00 (8 slots)
-const WEEKDAY_TIMES = ["13:00","14:00","15:00","16:00","17:00","18:00","19:00","20:00"];
+// Slot times per day
+// Mon–Fri + Sun: 13:00–20:00 (8 hours)
+// Saturday: 09:00–16:00 (8 hours)
+// Mon, Tue, Thu, Sat: 2 parallel slots per hour (Room A + Room B) → 16 slots
+// Wed, Fri, Sun: 1 slot per hour → 8 slots
+const WEEKDAY_TIMES  = ["13:00","14:00","15:00","16:00","17:00","18:00","19:00","20:00"];
 const SATURDAY_TIMES = ["09:00","10:00","11:00","12:00","13:00","14:00","15:00","16:00"];
+const DUAL_DAYS      = ["Monday","Tuesday","Thursday","Saturday"];
 
-const slotTimesFor = (dayName) => dayName === "Saturday" ? SATURDAY_TIMES : WEEKDAY_TIMES;
+const slotTimesFor  = (dayName) => dayName === "Saturday" ? SATURDAY_TIMES : WEEKDAY_TIMES;
+const isDualDay     = (dayName) => DUAL_DAYS.includes(dayName);
 
 const css = `
   @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;1,400&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700&display=swap');
@@ -90,30 +94,40 @@ const addDays  = (d, n) => {
   return dt.toISOString().slice(0, 10);
 };
 
-// Build template using correct times for the given day
-const buildTemplate = (day) =>
-  slotTimesFor(day).map((time, i) => ({ id: `slot_${i}`, time, className: "", studentNames: [] }));
+// Build template — dual days get 2 slots per hour (Room A + Room B)
+const buildTemplate = (day) => {
+  const times = slotTimesFor(day);
+  if (isDualDay(day)) {
+    return times.flatMap((time, i) => [
+      { id: `slot_${i}_a`, time, room: "Room A", className: "", studentNames: [] },
+      { id: `slot_${i}_b`, time, room: "Room B", className: "", studentNames: [] },
+    ]);
+  }
+  return times.map((time, i) => ({ id: `slot_${i}`, time, room: null, className: "", studentNames: [] }));
+};
 
 const buildWeekTemplates = () =>
   Object.fromEntries(DAYS.map(d => [d, buildTemplate(d)]));
 
 // ── Storage (localStorage) ───────────────────────────────────────────────────
-const STORE = "kana_v5";
+const STORE = "kana_v6";
 function loadData() {
   try {
     const raw = localStorage.getItem(STORE);
     if (raw) {
       const parsed = JSON.parse(raw);
-      // Migrate: ensure each day has correct slot times
       if (parsed.weekTemplates) {
         DAYS.forEach(d => {
-          const correct = slotTimesFor(d);
-          if (!parsed.weekTemplates[d] || parsed.weekTemplates[d].length !== correct.length) {
-            parsed.weekTemplates[d] = buildTemplate(d);
+          const expected = buildTemplate(d);
+          if (!parsed.weekTemplates[d] || parsed.weekTemplates[d].length !== expected.length) {
+            parsed.weekTemplates[d] = expected;
           } else {
-            // Update times in case they changed
+            // Ensure times and room labels are correct, preserve class/student data
             parsed.weekTemplates[d] = parsed.weekTemplates[d].map((slot, i) => ({
-              ...slot, time: correct[i]
+              ...slot,
+              time: expected[i]?.time || slot.time,
+              room: expected[i]?.room || null,
+              id:   expected[i]?.id   || slot.id,
             }));
           }
         });
@@ -434,6 +448,11 @@ function TemplateBuilder({ weekTemplates, onSave, onClose }) {
                 ⏰ Saturday runs 09:00–16:00
               </p>
             )}
+            {isDualDay(activeDay) && (
+              <p style={{ fontSize:12, color:C.purple, marginTop:4, fontWeight:600 }}>
+                🏫 2 classrooms — Room A &amp; Room B per hour
+              </p>
+            )}
           </div>
           <button onClick={onClose} style={{ background:"none", border:"none", color:C.muted, fontSize:24, cursor:"pointer", padding:4 }}>×</button>
         </div>
@@ -481,8 +500,14 @@ function TemplateBuilder({ weekTemplates, onSave, onClose }) {
                 border:`1.5px solid ${hasClass ? C.borderBright : C.border}`,
                 borderLeft:`4px solid ${hasClass ? C.purple : C.border}`,
               }}>
-                <span style={{ fontFamily:MONO, fontSize:12, color:C.amber, minWidth:52, fontWeight:600 }}>
+                <span style={{ fontFamily:MONO, fontSize:12, color:C.amber, minWidth:70, fontWeight:600 }}>
                   {slot.time}
+                  {slot.room && (
+                    <span style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:.3,
+                      color: slot.room === "Room A" ? C.purple : C.forest }}>
+                      {slot.room}
+                    </span>
+                  )}
                 </span>
                 <div style={{ flex:1 }}>
                   {hasClass ? (
@@ -556,10 +581,20 @@ function SlotCard({ slot, report, onLog, onEditTemplate }) {
         background: hasReport ? C.greenBg : isEmpty ? C.bg : C.amberBg,
         borderBottom:`1px solid ${hasReport ? C.green+"33" : isEmpty ? C.border : C.amber+"33"}`,
       }}>
-        <span style={{ fontFamily:MONO, fontSize:11, letterSpacing:1.5, fontWeight:700,
-          color: hasReport ? C.green : isEmpty ? C.muted : C.amber }}>
-          {slot.time}
-        </span>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <span style={{ fontFamily:MONO, fontSize:11, letterSpacing:1.5, fontWeight:700,
+            color: hasReport ? C.green : isEmpty ? C.muted : C.amber }}>
+            {slot.time}
+          </span>
+          {slot.room && (
+            <span style={{ fontFamily:MONO, fontSize:10, fontWeight:700, letterSpacing:.5,
+              color: slot.room === "Room A" ? C.purple : C.forest,
+              background: slot.room === "Room A" ? C.purpleBg : C.greenDim,
+              padding:"1px 7px", borderRadius:99 }}>
+              {slot.room}
+            </span>
+          )}
+        </div>
         {hasReport && (
           <span style={{ fontSize:10, color:C.green, fontWeight:800, letterSpacing:.5 }}>✓ LOGGED</span>
         )}
@@ -772,18 +807,45 @@ function App() {
           }}>Edit {dow}</button>
         </div>
 
-        {/* ── 8-SLOT GRID ── */}
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(270px, 1fr))", gap:14 }}>
-          {slots.map(slot => (
-            <SlotCard
-              key={slot.id}
-              slot={slot}
-              report={dayReports[slot.id]}
-              onLog={() => setReportSlot(slot)}
-              onEditTemplate={() => setShowTemplate(true)}
-            />
-          ))}
-        </div>
+        {/* ── SLOT GRID — group dual-day slots by hour ── */}
+        {isDualDay(dow) ? (() => {
+          // Group slots into pairs by time
+          const times = slotTimesFor(dow);
+          return (
+            <div style={{ display:"grid", gap:14 }}>
+              {times.map(time => {
+                const pair = slots.filter(s => s.time === time);
+                return (
+                  <div key={time}>
+                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                      {pair.map(slot => (
+                        <SlotCard
+                          key={slot.id}
+                          slot={slot}
+                          report={dayReports[slot.id]}
+                          onLog={() => setReportSlot(slot)}
+                          onEditTemplate={() => setShowTemplate(true)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })() : (
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(270px, 1fr))", gap:14 }}>
+            {slots.map(slot => (
+              <SlotCard
+                key={slot.id}
+                slot={slot}
+                report={dayReports[slot.id]}
+                onLog={() => setReportSlot(slot)}
+                onEditTemplate={() => setShowTemplate(true)}
+              />
+            ))}
+          </div>
+        )}
 
         <p style={{ textAlign:"center", color:C.muted, fontSize:11, marginTop:32,
           fontFamily:MONO, letterSpacing:.5 }}>
