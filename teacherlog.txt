@@ -423,10 +423,10 @@ function TemplateBuilder({ weekTemplates, onSave, onClose }) {
         {/* copy from another day */}
         <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:18, padding:"10px 14px", background:C.card, borderRadius:9 }}>
           <span style={{ fontSize:12, color:C.muted, flex:1 }}>Copy schedule from another day into {activeDay}:</span>
-          <div style={{ display:"flex", gap:6", flexWrap:"wrap" }}>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
             {DAYS.filter(d => d !== activeDay).map(d => (
               <Btn key={d} variant="dim" small onClick={() => {
-                if (window.confirm(`Copy ${d}'s schedule into ${activeDay}? This will overwrite ${activeDay}.`)) copyDay(d, activeDay);
+                if (window.confirm("Copy " + d + "'s schedule into " + activeDay + "? This will overwrite " + activeDay + ".")) copyDay(d, activeDay);
               }}>{d.slice(0,3)}</Btn>
             ))}
           </div>
