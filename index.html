@@ -3,27 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Teacher Log</title>
-    
+    <title>KANA Daily Log</title>
+
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
-    </head>
+</head>
 <body>
     <div id="root"></div>
 
-    <script type="text/babel">
+    <script type="text/babel" data-presets="react">
 
-        // 👑 STEP 3: PASTE YOUR ENTIRE REACT CODE DIRECTLY BELOW THIS LINE!
-        import { useState, useEffect } from "react";
+        const { useState, useEffect } = React;
 
-        // ─────────────────────────────────────────────────────────────────────────────
-        // KANA Daily Log v4
-        // Weekly schedule templates: set up Mon/Tue/Wed etc once → auto-loads every week
-        // Dark utilitarian aesthetic — staff room notice board meets modern dashboard
-        // ─────────────────────────────────────────────────────────────────────────────
-        
         const C = {
           bg:          "#0F1923",
           surface:     "#16232F",
@@ -50,21 +42,21 @@
           textDim:     "#94A3B8",
           white:       "#FFFFFF",
         };
-        
+
         const SERIF = "'Playfair Display', Georgia, serif";
         const MONO  = "'DM Mono', 'Courier New', monospace";
         const BODY  = "'Outfit', system-ui, sans-serif";
-        
+
         const MOODS       = ["😄 Excellent","🙂 Good","😐 Neutral","😕 Low","😤 Difficult"];
         const ENGAGEMENT  = ["🔥 Highly engaged","✅ Engaged","😐 Mixed","😴 Low engagement","📵 Disengaged"];
         const PERFORMANCE = ["⭐ Exceeded goals","✅ Met goals","〜 Partially met","❌ Below goals","🚫 No lesson goals set"];
-        
+
         const DAYS = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
         const SLOT_TIMES = [
           "9:00 AM","10:00 AM","11:00 AM","12:00 PM",
           "1:00 PM","2:00 PM","3:00 PM","4:00 PM",
         ];
-        
+
         const css = `
           @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700&display=swap');
           *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -80,11 +72,10 @@
           .fade-in  { animation: fadeIn .15s ease forwards; }
           select option { background: ${C.card}; color: ${C.text}; }
         `;
-        
-        // ── Helpers ──────────────────────────────────────────────────────────────────
+
         const uid       = () => Math.random().toString(36).slice(2, 9);
         const todayStr  = () => new Date().toISOString().slice(0, 10);
-        const dowOf     = (d) => new Date(d + "T12:00:00").getDay(); // 0=Sun … 6=Sat
+        const dowOf     = (d) => new Date(d + "T12:00:00").getDay();
         const dayName   = (d) => DAYS[dowOf(d)];
         const fmtDay    = (d) => new Date(d + "T12:00:00").toLocaleDateString("en-GB", {
           weekday:"long", day:"numeric", month:"long", year:"numeric"
@@ -93,28 +84,26 @@
           const dt = new Date(d + "T12:00:00"); dt.setDate(dt.getDate() + n);
           return dt.toISOString().slice(0, 10);
         };
-        
-        // ── Default schedule template ─────────────────────────────────────────────────
+
         const buildTemplate = () =>
           SLOT_TIMES.map((time, i) => ({ id: `slot_${i}`, time, className: "", studentNames: [] }));
-        
+
         const buildWeekTemplates = () =>
           Object.fromEntries(DAYS.map(d => [d, buildTemplate()]));
-        
-        // ── Storage ───────────────────────────────────────────────────────────────────
+
+        // ── Storage using localStorage ──
         const STORE = "kana_v4";
-        async function loadData() {
+        function loadData() {
           try {
-            const r = await window.storage.get(STORE);
-            if (r) return JSON.parse(r.value);
-          } catch {}
+            const raw = localStorage.getItem(STORE);
+            if (raw) return JSON.parse(raw);
+          } catch (e) { console.error(e); }
           return { weekTemplates: buildWeekTemplates(), reports: {} };
         }
-        async function saveData(d) {
-          try { await window.storage.set(STORE, JSON.stringify(d)); } catch (e) { console.error(e); }
+        function saveData(d) {
+          try { localStorage.setItem(STORE, JSON.stringify(d)); } catch (e) { console.error(e); }
         }
-        
-        // ── Primitive UI ──────────────────────────────────────────────────────────────
+
         const Btn = ({ children, onClick, variant = "primary", small, disabled, full, style: s = {} }) => {
           const variants = {
             primary: { bg: C.amber,      col: "#000",    bdr: "none" },
@@ -137,14 +126,14 @@
             >{children}</button>
           );
         };
-        
+
         const FieldLabel = ({ children, hint }) => (
           <div style={{ marginBottom: 6 }}>
             <span style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 1 }}>{children}</span>
             {hint && <span style={{ fontSize: 11, color: C.muted, marginLeft: 6 }}>— {hint}</span>}
           </div>
         );
-        
+
         const DarkSelect = ({ label, hint, value, onChange, options }) => (
           <div>
             {label && <FieldLabel hint={hint}>{label}</FieldLabel>}
@@ -158,7 +147,7 @@
             </select>
           </div>
         );
-        
+
         const DarkInput = ({ label, value, onChange, placeholder, type = "text" }) => (
           <div>
             {label && <FieldLabel>{label}</FieldLabel>}
@@ -169,8 +158,7 @@
               onBlur={e => e.target.style.borderColor = C.border} />
           </div>
         );
-        
-        // ── Student Mark Row ──────────────────────────────────────────────────────────
+
         function StudentMark({ name, mark, onChange }) {
           const cfg = {
             positive: { icon: "✓", bg: C.greenDim,  col: C.green, border: C.green },
@@ -180,7 +168,7 @@
           };
           const toggle = (type) => onChange(mark === type ? "none" : type);
           const active = cfg[mark] || cfg.none;
-        
+
           return (
             <div style={{
               display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -216,24 +204,23 @@
             </div>
           );
         }
-        
-        // ── Class Report Modal ─────────────────────────────────────────────────────────
+
         function ReportModal({ slot, existing, onSave, onClose }) {
           const [mood,        setMood]        = useState(existing?.mood        || MOODS[1]);
           const [engagement,  setEngagement]  = useState(existing?.engagement  || ENGAGEMENT[1]);
           const [performance, setPerformance] = useState(existing?.performance || PERFORMANCE[1]);
           const [note,        setNote]        = useState(existing?.note        || "");
           const [marks,       setMarks]       = useState(existing?.marks       || {});
-        
+
           const setMark = (name, m) => setMarks(prev => ({ ...prev, [name]: m }));
           const getMark = (name)    => marks[name] || "none";
-        
+
           const counts = {
             pos: slot.studentNames.filter(n => getMark(n) === "positive").length,
             neg: slot.studentNames.filter(n => getMark(n) === "negative").length,
             fl:  slot.studentNames.filter(n => getMark(n) === "flag").length,
           };
-        
+
           return (
             <div className="fade-in" style={{
               position: "fixed", inset: 0, background: "rgba(0,0,0,.78)",
@@ -245,7 +232,6 @@
                 borderRadius: 14, width: "100%", maxWidth: 520,
                 maxHeight: "92vh", overflowY: "auto", padding: 24,
               }}>
-                {/* header */}
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
                   <div>
                     <p style={{ fontFamily: MONO, fontSize: 11, color: C.amber, letterSpacing: 2, marginBottom: 4 }}>{slot.time}</p>
@@ -254,16 +240,14 @@
                   </div>
                   <button onClick={onClose} style={{ background:"none", border:"none", color:C.muted, fontSize:22, cursor:"pointer", padding:4 }}>×</button>
                 </div>
-        
-                {/* 3 questions */}
+
                 <div style={{ background: C.card, borderRadius: 10, padding: 16, marginBottom: 20, display: "grid", gap: 14 }}>
                   <p style={{ fontFamily: MONO, fontSize: 10, color: C.amber, letterSpacing: 2, textTransform: "uppercase" }}>Class Rating</p>
                   <DarkSelect label="1. General class mood / attitude"    value={mood}        onChange={setMood}        options={MOODS}       />
                   <DarkSelect label="2. How engaged were the students?"   value={engagement}  onChange={setEngagement}  options={ENGAGEMENT}  />
                   <DarkSelect label="3. Performance vs lesson goals"      value={performance} onChange={setPerformance} options={PERFORMANCE} />
                 </div>
-        
-                {/* student marks */}
+
                 {slot.studentNames.length > 0 && (
                   <div style={{ marginBottom: 20 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -282,8 +266,7 @@
                     </div>
                   </div>
                 )}
-        
-                {/* note */}
+
                 <div style={{ marginBottom: 20 }}>
                   <FieldLabel hint="optional">Teacher note</FieldLabel>
                   <textarea value={note} onChange={e => setNote(e.target.value)} rows={2}
@@ -293,7 +276,7 @@
                     onFocus={e => e.target.style.borderColor = C.amber}
                     onBlur={e => e.target.style.borderColor = C.border} />
                 </div>
-        
+
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                   <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
                   <Btn variant="primary" onClick={() => { onSave({ mood, engagement, performance, note, marks, savedAt: new Date().toISOString() }); onClose(); }}>
@@ -304,18 +287,17 @@
             </div>
           );
         }
-        
-        // ── Slot Editor (in template builder) ────────────────────────────────────────
+
         function SlotEditorModal({ slot, dayName, onSave, onClose }) {
           const [className,   setClassName]   = useState(slot.className || "");
           const [studentText, setStudentText] = useState((slot.studentNames || []).join("\n"));
-        
+
           const save = () => {
             const names = studentText.split("\n").map(s => s.trim()).filter(Boolean);
             onSave({ className, studentNames: names });
             onClose();
           };
-        
+
           return (
             <div className="fade-in" style={{
               position:"fixed", inset:0, background:"rgba(0,0,0,.78)",
@@ -356,29 +338,28 @@
             </div>
           );
         }
-        
-        // ── Weekly Template Builder ────────────────────────────────────────────────────
+
         function TemplateBuilder({ weekTemplates, onSave, onClose }) {
           const [templates, setTemplates] = useState(JSON.parse(JSON.stringify(weekTemplates)));
           const [activeDay, setActiveDay] = useState("Monday");
           const [editingSlot, setEditingSlot] = useState(null);
-        
+
           const updateSlot = (day, slotId, updates) => {
             setTemplates(prev => ({
               ...prev,
               [day]: prev[day].map(s => s.id === slotId ? { ...s, ...updates } : s),
             }));
           };
-        
+
           const copyDay = (fromDay, toDay) => {
             setTemplates(prev => ({
               ...prev,
               [toDay]: prev[fromDay].map(s => ({ ...s, id: s.id })),
             }));
           };
-        
+
           const slots = templates[activeDay] || [];
-        
+
           return (
             <div className="fade-in" style={{
               position:"fixed", inset:0, background:"rgba(0,0,0,.85)",
@@ -393,13 +374,12 @@
                   onClose={() => setEditingSlot(null)}
                 />
               )}
-        
+
               <div className="slide-up" style={{
                 background:C.surface, border:`1px solid ${C.borderBright}`,
                 borderRadius:16, width:"100%", maxWidth:680,
                 maxHeight:"94vh", overflowY:"auto", padding:28,
               }}>
-                {/* header */}
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:22 }}>
                   <div>
                     <p style={{ fontFamily:MONO, fontSize:10, color:C.purple, letterSpacing:2, marginBottom:4 }}>WEEKLY SCHEDULE</p>
@@ -410,8 +390,7 @@
                   </div>
                   <button onClick={onClose} style={{ background:"none", border:"none", color:C.muted, fontSize:22, cursor:"pointer", padding:4 }}>×</button>
                 </div>
-        
-                {/* day tabs */}
+
                 <div style={{ display:"flex", gap:6, marginBottom:20, flexWrap:"wrap" }}>
                   {DAYS.map(d => {
                     const filled = (templates[d] || []).filter(s => s.className).length;
@@ -437,8 +416,7 @@
                     );
                   })}
                 </div>
-        
-                {/* copy from another day */}
+
                 <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:18, padding:"10px 14px", background:C.card, borderRadius:9 }}>
                   <span style={{ fontSize:12, color:C.muted, flex:1 }}>Copy schedule from another day into {activeDay}:</span>
                   <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
@@ -449,8 +427,7 @@
                     ))}
                   </div>
                 </div>
-        
-                {/* slot list for active day */}
+
                 <div style={{ display:"grid", gap:8 }}>
                   {slots.map(slot => {
                     const hasClass = !!slot.className;
@@ -493,8 +470,7 @@
                     );
                   })}
                 </div>
-        
-                {/* save */}
+
                 <div style={{ display:"flex", gap:10, justifyContent:"flex-end", marginTop:24 }}>
                   <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
                   <Btn variant="purple" onClick={() => { onSave(templates); onClose(); }}
@@ -506,18 +482,17 @@
             </div>
           );
         }
-        
-        // ── Slot Card (daily view) ────────────────────────────────────────────────────
+
         function SlotCard({ slot, report, onLog, onEditTemplate }) {
           const isEmpty  = !slot.className;
           const hasReport = !!report;
-        
+
           const counts = hasReport ? {
             pos: Object.values(report.marks || {}).filter(m => m === "positive").length,
             neg: Object.values(report.marks || {}).filter(m => m === "negative").length,
             fl:  Object.values(report.marks || {}).filter(m => m === "flag").length,
           } : null;
-        
+
           return (
             <div style={{
               background: hasReport ? C.card : isEmpty ? C.surface : C.card,
@@ -525,7 +500,6 @@
               borderRadius:11, overflow:"hidden",
               borderLeft:`3px solid ${hasReport ? C.green : isEmpty ? C.border : C.amber}`,
             }}>
-              {/* time strip */}
               <div style={{
                 padding:"5px 12px", display:"flex", justifyContent:"space-between", alignItems:"center",
                 background: hasReport ? C.greenDim : isEmpty ? C.bg : C.amberDim,
@@ -536,8 +510,7 @@
                 </span>
                 {hasReport && <span style={{ fontSize:10, color:C.green, fontWeight:700 }}>✓ LOGGED</span>}
               </div>
-        
-              {/* body */}
+
               <div style={{ padding:"12px 14px" }}>
                 {isEmpty ? (
                   <div style={{ textAlign:"center", padding:"8px 0" }}>
@@ -553,8 +526,7 @@
                       </div>
                       <button onClick={onEditTemplate} title="Edit template" style={{ background:"none", border:"none", color:C.muted, fontSize:12, cursor:"pointer", padding:"2px 4px" }}>✎</button>
                     </div>
-        
-                    {/* student name pills */}
+
                     {slot.studentNames.length > 0 && (
                       <div style={{ display:"flex", flexWrap:"wrap", gap:4, marginBottom:10 }}>
                         {slot.studentNames.map(name => {
@@ -573,8 +545,7 @@
                         })}
                       </div>
                     )}
-        
-                    {/* report summary */}
+
                     {hasReport && counts && (
                       <div style={{ display:"flex", gap:10, marginBottom:10, flexWrap:"wrap", fontSize:12 }}>
                         <span style={{ color:C.textDim }}>{report.mood.split(" ")[0]} {report.engagement.split(" ")[0]}</span>
@@ -583,7 +554,7 @@
                         {counts.fl  > 0 && <span style={{ color:C.amber,  fontWeight:700 }}>🚩 {counts.fl}</span>}
                       </div>
                     )}
-        
+
                     <Btn variant={hasReport ? "ghost" : "primary"} small full onClick={onLog} style={{ fontSize:12 }}>
                       {hasReport ? "View / Edit Report" : "Log This Class →"}
                     </Btn>
@@ -593,8 +564,7 @@
             </div>
           );
         }
-        
-        // ── Date Navigation ───────────────────────────────────────────────────────────
+
         function DateNav({ date, onChange }) {
           const isToday = date === todayStr();
           return (
@@ -619,8 +589,7 @@
             </div>
           );
         }
-        
-        // ── Day Stats Bar ─────────────────────────────────────────────────────────────
+
         function DayStats({ slots, dayReports }) {
           const active = slots.filter(s => s.className);
           const logged = active.filter(s => dayReports[s.id]).length;
@@ -628,9 +597,9 @@
           const pos = allMarks.filter(m => m === "positive").length;
           const neg = allMarks.filter(m => m === "negative").length;
           const fl  = allMarks.filter(m => m === "flag").length;
-        
+
           if (!active.length) return null;
-        
+
           return (
             <div style={{ display:"flex", gap:16, flexWrap:"wrap", alignItems:"center" }}>
               <span style={{ fontFamily:MONO, fontSize:12, color: logged === active.length ? C.green : C.amber }}>
@@ -642,49 +611,47 @@
             </div>
           );
         }
-        
-        // ── MAIN APP ──────────────────────────────────────────────────────────────────
-        export default function App() {
+
+        function App() {
           const [data,          setData]          = useState(null);
           const [date,          setDate]          = useState(todayStr());
           const [reportSlot,    setReportSlot]    = useState(null);
           const [showTemplate,  setShowTemplate]  = useState(false);
-          const [templateDay,   setTemplateDay]   = useState(null); // jump to specific day in builder
-        
-          useEffect(() => { loadData().then(setData); }, []);
-        
+          const [templateDay,   setTemplateDay]   = useState(null);
+
+          useEffect(() => { setData(loadData()); }, []);
+
           const persist = (next) => { setData(next); saveData(next); };
-        
+
           if (!data) return (
             <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100vh", background:C.bg }}>
               <p style={{ color:C.muted, fontFamily:BODY }}>Loading...</p>
             </div>
           );
-        
-          // Get today's day name → look up template for that day
-          const dow        = dayName(date);                              // e.g. "Tuesday"
+
+          const dow        = dayName(date);
           const slots      = (data.weekTemplates || buildWeekTemplates())[dow] || buildTemplate();
           const reports    = data.reports || {};
           const reportKey  = (slotId) => `${date}_${slotId}`;
           const dayReports = Object.fromEntries(slots.map(s => [s.id, reports[reportKey(s.id)]]));
-        
+
           const saveReport = (slot, report) => {
             persist({ ...data, reports: { ...reports, [reportKey(slot.id)]: report } });
           };
-        
+
           const saveTemplates = (newTemplates) => {
             persist({ ...data, weekTemplates: newTemplates });
           };
-        
+
           const openTemplateBuilder = (focusDay) => {
             setTemplateDay(focusDay || dow);
             setShowTemplate(true);
           };
-        
+
           return (
             <>
               <style>{css}</style>
-        
+
               {reportSlot && (
                 <ReportModal
                   slot={reportSlot}
@@ -693,7 +660,7 @@
                   onClose={() => setReportSlot(null)}
                 />
               )}
-        
+
               {showTemplate && (
                 <TemplateBuilder
                   weekTemplates={data.weekTemplates || buildWeekTemplates()}
@@ -701,10 +668,9 @@
                   onClose={() => setShowTemplate(false)}
                 />
               )}
-        
+
               <div style={{ maxWidth:920, margin:"0 auto", padding:"24px 16px 48px", minHeight:"100vh" }}>
-        
-                {/* ── HEADER ── */}
+
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:24, flexWrap:"wrap", gap:12 }}>
                   <h1 style={{ fontFamily:SERIF, fontSize:26, color:C.white }}>
                     KANA <span style={{ color:C.amber }}>Daily Log</span>
@@ -716,13 +682,11 @@
                     </Btn>
                   </div>
                 </div>
-        
-                {/* ── DATE NAV ── */}
+
                 <div style={{ marginBottom:22 }}>
                   <DateNav date={date} onChange={setDate} />
                 </div>
-        
-                {/* ── DAY LABEL ── */}
+
                 <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:18 }}>
                   <p style={{ fontFamily:MONO, fontSize:11, color:C.purple, letterSpacing:2, textTransform:"uppercase" }}>
                     {dow} Schedule
@@ -732,8 +696,7 @@
                     padding:"3px 10px", color:C.muted, fontSize:11, cursor:"pointer",
                   }}>Edit {dow}</button>
                 </div>
-        
-                {/* ── 8-SLOT GRID ── */}
+
                 <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(260px, 1fr))", gap:12 }}>
                   {slots.map(slot => (
                     <SlotCard
@@ -745,7 +708,7 @@
                     />
                   ))}
                 </div>
-        
+
                 <p style={{ textAlign:"center", color:C.muted, fontSize:11, marginTop:28, fontFamily:MONO, letterSpacing:.5 }}>
                   Weekly templates auto-load per day · Reports saved per date
                 </p>
@@ -754,11 +717,6 @@
           );
         }
 
-
-
-        // ================================================================
-        // STEP 4: This connects your React code to the "root" div above
-        // (Change 'App' to whatever your main function component is called)
         const container = document.getElementById('root');
         const root = ReactDOM.createRoot(container);
         root.render(<App />);
