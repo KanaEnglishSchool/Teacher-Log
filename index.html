@@ -75,6 +75,14 @@ async function saveReport(date, slotId, report) {
   await sbUpsert("reports", { id, data: report, saved_at: new Date().toISOString() });
 }
 
+// Load ALL reports for a date range (for analytics)
+async function loadReportsInRange(fromDate, toDate) {
+  // Supabase pattern: id >= fromDate and id <= toDate+"_zzz"
+  const rows = await sbGet("reports",
+    `?id=gte.${fromDate}&id=lte.${toDate}_zzz&order=id.asc`);
+  return rows || [];
+}
+
 // ── Design tokens ─────────────────────────────────────────────────────────────
 const C = {
   bg:           "#F8F6F1",
@@ -171,9 +179,11 @@ function migrateTemplates(raw) {
     } else {
       wt[d] = wt[d].map((slot, i) => ({
         ...slot,
-        time: expected[i]?.time || slot.time,
-        room: expected[i]?.room !== undefined ? expected[i].room : slot.room,
-        id:   expected[i]?.id   || slot.id,
+        time:      expected[i]?.time || slot.time,
+        room:      expected[i]?.room !== undefined ? expected[i].room : slot.room,
+        id:        expected[i]?.id   || slot.id,
+        classType: slot.classType || CLASS_TYPES[0],
+        level:     slot.level     || "",
       }));
     }
   });
@@ -448,12 +458,14 @@ function ReportModal({ slot, existing, onSave, onClose }) {
 function SlotEditorModal({ slot, slotDayName, onSave, onClose }) {
   const [className,   setClassName]   = useState(slot.className || "");
   const [studentText, setStudentText] = useState((slot.studentNames || []).join("\n"));
+  const [classType,   setClassType]   = useState(slot.classType || CLASS_TYPES[0]);
+  const [level,       setLevel]       = useState(slot.level || "");
   const [saving,      setSaving]      = useState(false);
 
   const save = async () => {
     setSaving(true);
     const names = studentText.split("\n").map(s => s.trim()).filter(Boolean);
-    await onSave({ className, studentNames: names });
+    await onSave({ className, studentNames: names, classType, level });
     setSaving(false);
     onClose();
   };
@@ -480,6 +492,17 @@ function SlotEditorModal({ slot, slotDayName, onSave, onClose }) {
         </div>
         <div style={{ display:"grid", gap:16 }}>
           <LightInput label="Class name" value={className} onChange={setClassName} placeholder="e.g. Kids Tuesday 4pm" />
+          <div>
+            <FieldLabel>Class type</FieldLabel>
+            <select value={classType} onChange={e => setClassType(e.target.value)} style={{
+              width:"100%", background:C.surface, border:`1.5px solid ${C.border}`,
+              borderRadius:8, padding:"9px 12px", fontSize:14, color:C.text, outline:"none" }}
+              onFocus={e => e.target.style.borderColor = C.forest}
+              onBlur={e => e.target.style.borderColor = C.border}>
+              {CLASS_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <LightInput label="Level / group" value={level} onChange={setLevel} placeholder="e.g. Starter, Pre-Int, Advanced" />
           <div>
             <FieldLabel hint="one name per line">Student names</FieldLabel>
             <textarea value={studentText} onChange={e => setStudentText(e.target.value)}
@@ -801,6 +824,552 @@ function DayStats({ slots, dayReports }) {
   );
 }
 
+// ── Class types (for analytics grouping) ─────────────────────────────────────
+const CLASS_TYPES = ["Kids Class", "KPT", "Mini Kids / Playgroup B", "EWS", "Other"];
+
+// ── Analytics helpers ─────────────────────────────────────────────────────────
+
+// Parse "YYYY-MM-DD_slotId" → { date, slotId }
+function parseReportId(id) {
+  const match = id.match(/^(\d{4}-\d{2}-\d{2})_(.+)$/);
+  if (!match) return null;
+  return { date: match[1], slotId: match[2] };
+}
+
+// Given raw report rows and templates, build enriched records
+function buildAnalyticsRecords(rows, weekTemplates) {
+  const records = [];
+  rows.forEach(row => {
+    const parsed = parseReportId(row.id);
+    if (!parsed) return;
+    const { date, slotId } = parsed;
+    const dow = DAYS[new Date(date + "T12:00:00").getDay()];
+    const daySlots = weekTemplates?.[dow] || [];
+    const slot = daySlots.find(s => s.id === slotId);
+    if (!slot || !slot.className) return;
+    records.push({
+      date, slotId, dow,
+      className:   slot.className,
+      room:        slot.room,
+      time:        slot.time,
+      classType:   slot.classType || "Other",
+      level:       slot.level     || "—",
+      studentNames: slot.studentNames || [],
+      report:      row.data,
+      savedAt:     row.saved_at,
+    });
+  });
+  return records;
+}
+
+// Aggregate mood/engagement/performance counts from records
+function aggregateCounts(records, field, options) {
+  const counts = {};
+  options.forEach(o => counts[o] = 0);
+  records.forEach(r => {
+    const val = r.report?.[field];
+    if (val && counts[val] !== undefined) counts[val]++;
+  });
+  return counts;
+}
+
+// Per-student stats across records
+function buildStudentProfiles(records) {
+  const profiles = {};
+  records.forEach(rec => {
+    const marks = rec.report?.marks || {};
+    rec.studentNames.forEach(name => {
+      if (!profiles[name]) {
+        profiles[name] = { name, classes: 0, positive: 0, negative: 0, flag: 0, absent: 0, classNames: new Set() };
+      }
+      const p = profiles[name];
+      p.classes++;
+      p.classNames.add(rec.className);
+      const m = marks[name] || "none";
+      if (m === "positive") p.positive++;
+      else if (m === "negative") p.negative++;
+      else if (m === "flag") p.flag++;
+      else if (m === "absent") p.absent++;
+    });
+  });
+  return Object.values(profiles).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Date range helpers
+function isoWeekRange(offset = 0) {
+  const now = new Date();
+  const day = now.getDay();
+  const mon = new Date(now);
+  mon.setDate(now.getDate() - (day === 0 ? 6 : day - 1) + offset * 7);
+  const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+  return {
+    from: mon.toISOString().slice(0, 10),
+    to:   sun.toISOString().slice(0, 10),
+    label: offset === 0 ? "This Week" : offset === -1 ? "Last Week" : `${Math.abs(offset)}w ago`,
+  };
+}
+
+function monthRange(offset = 0) {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth() + offset;
+  const first = new Date(y, m, 1);
+  const last  = new Date(y, m + 1, 0);
+  return {
+    from:  first.toISOString().slice(0, 10),
+    to:    last.toISOString().slice(0, 10),
+    label: first.toLocaleDateString("en-GB", { month: "long", year: "numeric" }),
+  };
+}
+
+// ── SVG Pie Chart ─────────────────────────────────────────────────────────────
+function PieChart({ data, size = 140 }) {
+  // data: [{ label, value, color }]
+  const total = data.reduce((s, d) => s + d.value, 0);
+  if (total === 0) return (
+    <div style={{ width: size, height: size, borderRadius: "50%",
+      background: C.border, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <span style={{ fontSize: 11, color: C.muted }}>No data</span>
+    </div>
+  );
+
+  let cumAngle = -90; // start at top
+  const slices = data.map(d => {
+    const pct   = d.value / total;
+    const angle = pct * 360;
+    const start = cumAngle;
+    cumAngle += angle;
+    return { ...d, pct, startAngle: start, endAngle: cumAngle };
+  });
+
+  const toXY = (angle, r) => {
+    const rad = (angle * Math.PI) / 180;
+    return { x: 50 + r * Math.cos(rad), y: 50 + r * Math.sin(rad) };
+  };
+
+  const r = 40;
+  const cx = 50, cy = 50;
+
+  return (
+    <svg viewBox="0 0 100 100" width={size} height={size} style={{ overflow: "visible" }}>
+      {slices.map((s, i) => {
+        if (s.value === 0) return null;
+        const start = toXY(s.startAngle, r);
+        const end   = toXY(s.endAngle,   r);
+        const large = (s.endAngle - s.startAngle) > 180 ? 1 : 0;
+        // If 100%, draw circle
+        if (s.pct >= 0.9999) {
+          return <circle key={i} cx={cx} cy={cy} r={r} fill={s.color} />;
+        }
+        return (
+          <path key={i}
+            d={`M ${cx} ${cy} L ${start.x} ${start.y} A ${r} ${r} 0 ${large} 1 ${end.x} ${end.y} Z`}
+            fill={s.color} stroke={C.white} strokeWidth="1"
+          />
+        );
+      })}
+      {/* Centre hole */}
+      <circle cx={cx} cy={cy} r={22} fill={C.surface} />
+      <text x={cx} y={cy - 4} textAnchor="middle" fontSize="10" fontWeight="700" fill={C.text}>{total}</text>
+      <text x={cx} y={cy + 8} textAnchor="middle" fontSize="7" fill={C.muted}>classes</text>
+    </svg>
+  );
+}
+
+// ── Pie Legend ────────────────────────────────────────────────────────────────
+function PieLegend({ data, total }) {
+  return (
+    <div style={{ display: "grid", gap: 5 }}>
+      {data.filter(d => d.value > 0).map(d => (
+        <div key={d.label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ width: 10, height: 10, borderRadius: 3, background: d.color, flexShrink: 0 }} />
+          <span style={{ fontSize: 12, color: C.textDim, flex: 1 }}>{d.label.replace(/^.+?\s/, "")}</span>
+          <span style={{ fontSize: 12, fontWeight: 700, color: C.text, fontFamily: MONO }}>{d.value}</span>
+          <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO, minWidth: 36, textAlign: "right" }}>
+            {total > 0 ? Math.round(d.value / total * 100) + "%" : "—"}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Metric Card with Pie ──────────────────────────────────────────────────────
+function MetricPie({ title, data }) {
+  const total = data.reduce((s, d) => s + d.value, 0);
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
+      <p style={{ fontFamily: MONO, fontSize: 11, color: C.muted, textTransform: "uppercase",
+        letterSpacing: 1, marginBottom: 14, fontWeight: 700 }}>{title}</p>
+      <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
+        <PieChart data={data} size={120} />
+        <PieLegend data={data} total={total} />
+      </div>
+    </div>
+  );
+}
+
+// ── Student Profile Card ──────────────────────────────────────────────────────
+function StudentProfileCard({ profile }) {
+  const attended = profile.classes - profile.absent;
+  const attPct   = profile.classes > 0 ? Math.round(attended / profile.classes * 100) : 0;
+  const posPct   = attended > 0 ? Math.round(profile.positive / attended * 100) : 0;
+
+  const barColor = posPct >= 60 ? C.green : posPct >= 30 ? C.amber : C.coral;
+
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10,
+      padding: "14px 16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+        <div>
+          <p style={{ fontWeight: 700, fontSize: 15, color: C.forest }}>{profile.name}</p>
+          <p style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
+            {[...profile.classNames].join(", ")}
+          </p>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <p style={{ fontFamily: MONO, fontSize: 18, fontWeight: 700, color: C.forest }}>{attPct}%</p>
+          <p style={{ fontSize: 10, color: C.muted }}>attendance</p>
+        </div>
+      </div>
+
+      {/* Positive rate bar */}
+      <div style={{ marginBottom: 8 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+          <span style={{ fontSize: 11, color: C.textDim }}>Positive rate</span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: barColor, fontFamily: MONO }}>{posPct}%</span>
+        </div>
+        <div style={{ height: 6, background: C.border, borderRadius: 99, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${posPct}%`, background: barColor,
+            borderRadius: 99, transition: "width .4s ease" }} />
+        </div>
+      </div>
+
+      {/* Mark counts */}
+      <div style={{ display: "flex", gap: 8, fontSize: 11 }}>
+        {[
+          { icon: "✓", val: profile.positive, col: C.green  },
+          { icon: "✗", val: profile.negative, col: C.coral  },
+          { icon: "🚩",val: profile.flag,     col: C.amber  },
+          { icon: "○", val: profile.absent,   col: C.muted  },
+        ].map(({ icon, val, col }) => (
+          <span key={icon} style={{ color: col, fontWeight: 700, fontFamily: MONO }}>
+            {icon} {val}
+          </span>
+        ))}
+        <span style={{ color: C.muted, marginLeft: "auto" }}>{profile.classes} logged</span>
+      </div>
+    </div>
+  );
+}
+
+// ── Analytics View ────────────────────────────────────────────────────────────
+function AnalyticsView({ weekTemplates, onClose }) {
+  const [loading,     setLoading]     = useState(true);
+  const [records,     setRecords]     = useState([]);
+  const [rangeMode,   setRangeMode]   = useState("week"); // week | month
+  const [rangeOffset, setRangeOffset] = useState(0);
+  const [filterType,  setFilterType]  = useState("All");
+  const [filterClass, setFilterClass] = useState("All");
+  const [activeTab,   setActiveTab]   = useState("overview"); // overview | classes | students
+  const [searchName,  setSearchName]  = useState("");
+
+  const range = rangeMode === "week" ? isoWeekRange(rangeOffset) : monthRange(rangeOffset);
+
+  useEffect(() => {
+    setLoading(true);
+    loadReportsInRange(range.from, range.to).then(rows => {
+      setRecords(buildAnalyticsRecords(rows, weekTemplates));
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  }, [range.from, range.to]);
+
+  // Filter records
+  const filtered = records.filter(r => {
+    if (filterType  !== "All" && r.classType  !== filterType)  return false;
+    if (filterClass !== "All" && r.className  !== filterClass) return false;
+    return true;
+  });
+
+  const allClassNames = [...new Set(records.map(r => r.className))].sort();
+
+  // Pie data builders
+  const moodData = [
+    { label: MOODS[0], value: aggregateCounts(filtered, "mood", MOODS)[MOODS[0]], color: "#059669" },
+    { label: MOODS[1], value: aggregateCounts(filtered, "mood", MOODS)[MOODS[1]], color: "#34D399" },
+    { label: MOODS[2], value: aggregateCounts(filtered, "mood", MOODS)[MOODS[2]], color: "#FCD34D" },
+    { label: MOODS[3], value: aggregateCounts(filtered, "mood", MOODS)[MOODS[3]], color: "#F97316" },
+    { label: MOODS[4], value: aggregateCounts(filtered, "mood", MOODS)[MOODS[4]], color: "#EF4444" },
+  ];
+  const engData = [
+    { label: ENGAGEMENT[0], value: aggregateCounts(filtered, "engagement", ENGAGEMENT)[ENGAGEMENT[0]], color: "#059669" },
+    { label: ENGAGEMENT[1], value: aggregateCounts(filtered, "engagement", ENGAGEMENT)[ENGAGEMENT[1]], color: "#34D399" },
+    { label: ENGAGEMENT[2], value: aggregateCounts(filtered, "engagement", ENGAGEMENT)[ENGAGEMENT[2]], color: "#FCD34D" },
+    { label: ENGAGEMENT[3], value: aggregateCounts(filtered, "engagement", ENGAGEMENT)[ENGAGEMENT[3]], color: "#F97316" },
+    { label: ENGAGEMENT[4], value: aggregateCounts(filtered, "engagement", ENGAGEMENT)[ENGAGEMENT[4]], color: "#EF4444" },
+  ];
+  const perfData = [
+    { label: PERFORMANCE[0], value: aggregateCounts(filtered, "performance", PERFORMANCE)[PERFORMANCE[0]], color: "#059669" },
+    { label: PERFORMANCE[1], value: aggregateCounts(filtered, "performance", PERFORMANCE)[PERFORMANCE[1]], color: "#34D399" },
+    { label: PERFORMANCE[2], value: aggregateCounts(filtered, "performance", PERFORMANCE)[PERFORMANCE[2]], color: "#FCD34D" },
+    { label: PERFORMANCE[3], value: aggregateCounts(filtered, "performance", PERFORMANCE)[PERFORMANCE[3]], color: "#F97316" },
+    { label: PERFORMANCE[4], value: aggregateCounts(filtered, "performance", PERFORMANCE)[PERFORMANCE[4]], color: "#6B7280" },
+  ];
+
+  // Per-class breakdown
+  const classBreakdown = allClassNames.map(cn => {
+    const recs = filtered.filter(r => r.className === cn);
+    const allMarks = recs.flatMap(r => Object.values(r.report?.marks || {}));
+    const pos = allMarks.filter(m => m === "positive").length;
+    const neg = allMarks.filter(m => m === "negative").length;
+    const fl  = allMarks.filter(m => m === "flag").length;
+    const abs = allMarks.filter(m => m === "absent").length;
+    const total = allMarks.length;
+    return { className: cn, classType: recs[0]?.classType || "Other",
+      count: recs.length, pos, neg, fl, abs, total };
+  }).filter(c => c.count > 0);
+
+  // Student profiles
+  const students = buildStudentProfiles(filtered);
+  const filteredStudents = searchName
+    ? students.filter(s => s.name.toLowerCase().includes(searchName.toLowerCase()))
+    : students;
+
+  const Tab = ({ id, label }) => (
+    <button onClick={() => setActiveTab(id)} style={{
+      padding: "7px 16px", borderRadius: 8, border: "none",
+      background: activeTab === id ? C.forest : "transparent",
+      color: activeTab === id ? C.white : C.textDim,
+      fontWeight: 700, fontSize: 13, cursor: "pointer", transition: "all .15s",
+    }}>{label}</button>
+  );
+
+  return (
+    <div className="fade-in" style={{
+      position: "fixed", inset: 0, background: C.bg, zIndex: 2000,
+      overflowY: "auto",
+    }}>
+      <div style={{ maxWidth: 960, margin: "0 auto", padding: "24px 16px 56px" }}>
+
+        {/* Header */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start",
+          marginBottom: 24, paddingBottom: 20, borderBottom: `1.5px solid ${C.border}` }}>
+          <div>
+            <p style={{ fontFamily: MONO, fontSize: 10, color: C.purple, letterSpacing: 2,
+              fontWeight: 700, marginBottom: 4 }}>ANALYTICS</p>
+            <h1 style={{ fontFamily: SERIF, fontSize: 26, color: C.forest }}>
+              KANA <span style={{ color: C.amber, fontStyle: "italic" }}>Reports</span>
+            </h1>
+          </div>
+          <Btn variant="ghost" small onClick={onClose}>← Back to Log</Btn>
+        </div>
+
+        {/* Range controls */}
+        <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap", alignItems: "center" }}>
+          {/* Week / Month toggle */}
+          <div style={{ display: "flex", background: C.surface, border: `1px solid ${C.border}`,
+            borderRadius: 9, overflow: "hidden" }}>
+            {["week","month"].map(m => (
+              <button key={m} onClick={() => { setRangeMode(m); setRangeOffset(0); }} style={{
+                padding: "6px 16px", border: "none", fontWeight: 700, fontSize: 13, cursor: "pointer",
+                background: rangeMode === m ? C.forest : "transparent",
+                color: rangeMode === m ? C.white : C.textDim, transition: "all .15s",
+              }}>{m === "week" ? "Weekly" : "Monthly"}</button>
+            ))}
+          </div>
+
+          {/* Prev / label / Next */}
+          <button onClick={() => setRangeOffset(o => o - 1)} style={{
+            background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7,
+            padding: "6px 12px", cursor: "pointer", fontSize: 16, color: C.text }}>‹</button>
+          <span style={{ fontFamily: SERIF, fontSize: 16, color: C.forest, minWidth: 160, textAlign: "center" }}>
+            {range.label}
+          </span>
+          <button onClick={() => setRangeOffset(o => Math.min(o + 1, 0))} style={{
+            background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7,
+            padding: "6px 12px", cursor: "pointer", fontSize: 16, color: C.text,
+            opacity: rangeOffset >= 0 ? .4 : 1 }} disabled={rangeOffset >= 0}>›</button>
+
+          {/* Filters */}
+          <select value={filterType} onChange={e => setFilterType(e.target.value)} style={{
+            background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7,
+            padding: "6px 10px", fontSize: 13, color: C.text, cursor: "pointer" }}>
+            <option value="All">All class types</option>
+            {CLASS_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+
+          <select value={filterClass} onChange={e => setFilterClass(e.target.value)} style={{
+            background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7,
+            padding: "6px 10px", fontSize: 13, color: C.text, cursor: "pointer" }}>
+            <option value="All">All classes</option>
+            {allClassNames.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+
+        {/* Summary stats */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))",
+          gap: 10, marginBottom: 24 }}>
+          {[
+            { label: "Classes logged", value: filtered.length, col: C.forest },
+            { label: "Total students", value: [...new Set(filtered.flatMap(r => r.studentNames))].length, col: C.purple },
+            { label: "Absences",       value: filtered.flatMap(r => Object.values(r.report?.marks || {})).filter(m => m === "absent").length, col: C.coral },
+            { label: "Positive marks", value: filtered.flatMap(r => Object.values(r.report?.marks || {})).filter(m => m === "positive").length, col: C.green },
+            { label: "Flags",          value: filtered.flatMap(r => Object.values(r.report?.marks || {})).filter(m => m === "flag").length, col: C.amber },
+          ].map(s => (
+            <div key={s.label} style={{ background: C.surface, border: `1px solid ${C.border}`,
+              borderRadius: 10, padding: "12px 14px", textAlign: "center" }}>
+              <p style={{ fontFamily: SERIF, fontSize: 24, fontWeight: 700, color: s.col }}>{s.value}</p>
+              <p style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>{s.label}</p>
+            </div>
+          ))}
+        </div>
+
+        {/* Tabs */}
+        <div style={{ display: "flex", gap: 4, marginBottom: 20, background: C.surface,
+          padding: 5, borderRadius: 10, border: `1px solid ${C.border}`, width: "fit-content" }}>
+          <Tab id="overview"  label="Overview"  />
+          <Tab id="classes"   label="By Class"  />
+          <Tab id="students"  label="Students"  />
+        </div>
+
+        {loading ? (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 60, gap: 12 }}>
+            <div className="spin" style={{ width: 28, height: 28, border: `3px solid ${C.border}`,
+              borderTopColor: C.forest, borderRadius: "50%" }} />
+            <span style={{ fontFamily: MONO, fontSize: 13, color: C.muted }}>Loading data…</span>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div style={{ textAlign: "center", padding: 60 }}>
+            <p style={{ fontFamily: SERIF, fontSize: 20, color: C.muted, marginBottom: 8 }}>No data yet</p>
+            <p style={{ fontSize: 13, color: C.muted }}>Log some classes to see analytics here.</p>
+          </div>
+        ) : (
+          <>
+            {/* ── OVERVIEW TAB ── */}
+            {activeTab === "overview" && (
+              <div style={{ display: "grid", gap: 16 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
+                  <MetricPie title="Class Mood" data={moodData} />
+                  <MetricPie title="Student Engagement" data={engData} />
+                  <MetricPie title="Lesson Performance" data={perfData} />
+                </div>
+              </div>
+            )}
+
+            {/* ── BY CLASS TAB ── */}
+            {activeTab === "classes" && (
+              <div style={{ display: "grid", gap: 12 }}>
+                {classBreakdown.map(c => {
+                  const classRecs = filtered.filter(r => r.className === c.className);
+                  const cMood = [
+                    { label: MOODS[0], value: aggregateCounts(classRecs, "mood", MOODS)[MOODS[0]], color: "#059669" },
+                    { label: MOODS[1], value: aggregateCounts(classRecs, "mood", MOODS)[MOODS[1]], color: "#34D399" },
+                    { label: MOODS[2], value: aggregateCounts(classRecs, "mood", MOODS)[MOODS[2]], color: "#FCD34D" },
+                    { label: MOODS[3], value: aggregateCounts(classRecs, "mood", MOODS)[MOODS[3]], color: "#F97316" },
+                    { label: MOODS[4], value: aggregateCounts(classRecs, "mood", MOODS)[MOODS[4]], color: "#EF4444" },
+                  ];
+                  const cEng = [
+                    { label: ENGAGEMENT[0], value: aggregateCounts(classRecs, "engagement", ENGAGEMENT)[ENGAGEMENT[0]], color: "#059669" },
+                    { label: ENGAGEMENT[1], value: aggregateCounts(classRecs, "engagement", ENGAGEMENT)[ENGAGEMENT[1]], color: "#34D399" },
+                    { label: ENGAGEMENT[2], value: aggregateCounts(classRecs, "engagement", ENGAGEMENT)[ENGAGEMENT[2]], color: "#FCD34D" },
+                    { label: ENGAGEMENT[3], value: aggregateCounts(classRecs, "engagement", ENGAGEMENT)[ENGAGEMENT[3]], color: "#F97316" },
+                    { label: ENGAGEMENT[4], value: aggregateCounts(classRecs, "engagement", ENGAGEMENT)[ENGAGEMENT[4]], color: "#EF4444" },
+                  ];
+                  const cPerf = [
+                    { label: PERFORMANCE[0], value: aggregateCounts(classRecs, "performance", PERFORMANCE)[PERFORMANCE[0]], color: "#059669" },
+                    { label: PERFORMANCE[1], value: aggregateCounts(classRecs, "performance", PERFORMANCE)[PERFORMANCE[1]], color: "#34D399" },
+                    { label: PERFORMANCE[2], value: aggregateCounts(classRecs, "performance", PERFORMANCE)[PERFORMANCE[2]], color: "#FCD34D" },
+                    { label: PERFORMANCE[3], value: aggregateCounts(classRecs, "performance", PERFORMANCE)[PERFORMANCE[3]], color: "#F97316" },
+                    { label: PERFORMANCE[4], value: aggregateCounts(classRecs, "performance", PERFORMANCE)[PERFORMANCE[4]], color: "#6B7280" },
+                  ];
+                  const posPct = c.total > 0 ? Math.round(c.pos / c.total * 100) : 0;
+                  return (
+                    <div key={c.className} style={{ background: C.surface, border: `1px solid ${C.border}`,
+                      borderRadius: 12, padding: 20, borderLeft: `4px solid ${C.amber}` }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+                        <div>
+                          <h3 style={{ fontFamily: SERIF, fontSize: 18, color: C.forest }}>{c.className}</h3>
+                          <p style={{ fontSize: 12, color: C.muted, marginTop: 3 }}>
+                            {c.count} session{c.count !== 1 ? "s" : ""} logged · {c.classType}
+                          </p>
+                        </div>
+                        <div style={{ textAlign: "right" }}>
+                          <p style={{ fontFamily: MONO, fontSize: 20, fontWeight: 700,
+                            color: posPct >= 60 ? C.green : posPct >= 30 ? C.amber : C.coral }}>
+                            {posPct}%
+                          </p>
+                          <p style={{ fontSize: 10, color: C.muted }}>positive marks</p>
+                        </div>
+                      </div>
+                      {/* Student mark summary */}
+                      <div style={{ display: "flex", gap: 12, marginBottom: 16, fontSize: 12 }}>
+                        <span style={{ color: C.green,  fontWeight: 700 }}>✓ {c.pos}</span>
+                        <span style={{ color: C.coral,  fontWeight: 700 }}>✗ {c.neg}</span>
+                        <span style={{ color: C.amber,  fontWeight: 700 }}>🚩 {c.fl}</span>
+                        <span style={{ color: C.muted,  fontWeight: 700 }}>○ {c.abs} absent</span>
+                      </div>
+                      {/* 3 mini pies */}
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                        {[
+                          { title: "Mood", data: cMood },
+                          { title: "Engagement", data: cEng },
+                          { title: "Performance", data: cPerf },
+                        ].map(({ title, data }) => (
+                          <div key={title}>
+                            <p style={{ fontSize: 11, fontWeight: 700, color: C.muted,
+                              textTransform: "uppercase", letterSpacing: .8, marginBottom: 8 }}>{title}</p>
+                            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                              <PieChart data={data} size={80} />
+                              <div style={{ display: "grid", gap: 3 }}>
+                                {data.filter(d => d.value > 0).map(d => {
+                                  const t = data.reduce((s, x) => s + x.value, 0);
+                                  return (
+                                    <div key={d.label} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                                      <div style={{ width: 7, height: 7, borderRadius: 2, background: d.color }} />
+                                      <span style={{ fontSize: 10, color: C.muted }}>
+                                        {t > 0 ? Math.round(d.value / t * 100) : 0}%
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* ── STUDENTS TAB ── */}
+            {activeTab === "students" && (
+              <div>
+                <div style={{ marginBottom: 16 }}>
+                  <input value={searchName} onChange={e => setSearchName(e.target.value)}
+                    placeholder="Search student name…"
+                    style={{ width: "100%", maxWidth: 300, background: C.surface,
+                      border: `1.5px solid ${C.border}`, borderRadius: 8,
+                      padding: "8px 12px", fontSize: 14, color: C.text, outline: "none" }}
+                    onFocus={e => e.target.style.borderColor = C.forest}
+                    onBlur={e => e.target.style.borderColor = C.border} />
+                  <span style={{ fontSize: 12, color: C.muted, marginLeft: 12 }}>
+                    {filteredStudents.length} student{filteredStudents.length !== 1 ? "s" : ""}
+                  </span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
+                  {filteredStudents.map(p => <StudentProfileCard key={p.name} profile={p} />)}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── MAIN APP ──────────────────────────────────────────────────────────────────
 function App() {
   const [weekTemplates, setWeekTemplates] = useState(null);
@@ -808,6 +1377,7 @@ function App() {
   const [date,          setDate]          = useState(todayStr());
   const [reportSlot,    setReportSlot]    = useState(null);
   const [showTemplate,  setShowTemplate]  = useState(false);
+  const [showAnalytics, setShowAnalytics] = useState(false);
   const [appStatus,     setAppStatus]     = useState("loading");
   const [syncStatus,    setSyncStatus]    = useState(null);
   const [liveTime,      setLiveTime]      = useState(nowHHMM());
@@ -916,6 +1486,13 @@ function App() {
         />
       )}
 
+      {showAnalytics && (
+        <AnalyticsView
+          weekTemplates={weekTemplates || buildWeekTemplates()}
+          onClose={() => setShowAnalytics(false)}
+        />
+      )}
+
       <div style={{ maxWidth:940, margin:"0 auto", padding:"28px 16px 56px", minHeight:"100vh" }}>
 
         {/* HEADER */}
@@ -937,6 +1514,9 @@ function App() {
             <DayStats slots={slots} dayReports={dayReports} />
             <Btn variant="purple" small onClick={() => setShowTemplate(true)}>
               ⚙ Weekly Schedule
+            </Btn>
+            <Btn variant="green" small onClick={() => setShowAnalytics(true)}>
+              📊 Reports
             </Btn>
           </div>
         </div>
