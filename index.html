@@ -25,7 +25,6 @@ const headers = {
   "Prefer": "return=minimal",
 };
 
-// ── Supabase API helpers ──────────────────────────────────────────────────────
 async function sbGet(table, match = "") {
   const url = `${SUPABASE_URL}/rest/v1/${table}${match}`;
   const res = await fetch(url, { headers: { ...headers } });
@@ -45,11 +44,10 @@ async function sbUpsert(table, body) {
   }
 }
 
-// ── Load / Save week_templates ────────────────────────────────────────────────
 async function loadTemplates() {
   const rows = await sbGet("week_templates", "?id=eq.main");
   if (rows && rows.length > 0 && rows[0].data && Object.keys(rows[0].data).length > 0) {
-    return rows[0].data; // already a JS object, Supabase parses jsonb
+    return rows[0].data;
   }
   return null;
 }
@@ -58,8 +56,6 @@ async function saveTemplates(templates) {
   await sbUpsert("week_templates", { id: "main", data: templates, updated_at: new Date().toISOString() });
 }
 
-// ── Load / Save reports ───────────────────────────────────────────────────────
-// Reports keyed by "YYYY-MM-DD_slotId"
 async function loadReportsForDate(date) {
   const rows = await sbGet("reports", `?id=like.${date}_*`);
   const map = {};
@@ -75,11 +71,8 @@ async function saveReport(date, slotId, report) {
   await sbUpsert("reports", { id, data: report, saved_at: new Date().toISOString() });
 }
 
-// Load ALL reports for a date range (for analytics)
 async function loadReportsInRange(fromDate, toDate) {
-  // Supabase pattern: id >= fromDate and id <= toDate+"_zzz"
-  const rows = await sbGet("reports",
-    `?id=gte.${fromDate}&id=lte.${toDate}_zzz&order=id.asc`);
+  const rows = await sbGet("reports", `?id=gte.${fromDate}&id=lte.${toDate}_zzz&order=id.asc`);
   return rows || [];
 }
 
@@ -121,6 +114,9 @@ const WEEKDAY_TIMES  = ["13:00","14:00","15:00","16:00","17:00","18:00","19:00",
 const SATURDAY_TIMES = ["09:00","10:00","11:00","12:00","13:00","14:00","15:00","16:00"];
 const DUAL_DAYS      = ["Monday","Tuesday","Thursday","Saturday"];
 
+// ── IMPORTANT: CLASS_TYPES must be defined BEFORE migrateTemplates ────────────
+const CLASS_TYPES = ["Kids Class", "KPT", "Mini Kids / Playgroup B", "EWS", "Other"];
+
 const slotTimesFor = (d) => d === "Saturday" ? SATURDAY_TIMES : WEEKDAY_TIMES;
 const isDualDay    = (d) => DUAL_DAYS.includes(d);
 
@@ -159,17 +155,17 @@ const buildTemplate = (day) => {
   const times = slotTimesFor(day);
   if (isDualDay(day)) {
     return times.flatMap((time, i) => [
-      { id: `slot_${i}_a`, time, room: "Room A", className: "", studentNames: [] },
-      { id: `slot_${i}_b`, time, room: "Room B", className: "", studentNames: [] },
+      { id: `slot_${i}_a`, time, room: "Room A", className: "", studentNames: [], classType: CLASS_TYPES[0], level: "" },
+      { id: `slot_${i}_b`, time, room: "Room B", className: "", studentNames: [], classType: CLASS_TYPES[0], level: "" },
     ]);
   }
-  return times.map((time, i) => ({ id: `slot_${i}`, time, room: null, className: "", studentNames: [] }));
+  return times.map((time, i) => ({ id: `slot_${i}`, time, room: null, className: "", studentNames: [], classType: CLASS_TYPES[0], level: "" }));
 };
 
 const buildWeekTemplates = () =>
   Object.fromEntries(DAYS.map(d => [d, buildTemplate(d)]));
 
-// Migrate/validate loaded templates to ensure correct structure
+// CLASS_TYPES is now defined above so this is safe
 function migrateTemplates(raw) {
   const wt = raw || {};
   DAYS.forEach(d => {
@@ -191,33 +187,11 @@ function migrateTemplates(raw) {
 }
 
 // ── Current time helpers ──────────────────────────────────────────────────────
-// Returns "HH:MM" in 24h format for right now
 const nowHHMM = () => {
   const n = new Date();
   return `${String(n.getHours()).padStart(2,"0")}:${String(n.getMinutes()).padStart(2,"0")}`;
 };
 
-// Given an array of slots for today, find the one whose lesson is currently
-// ongoing. A slot owns the hour from its start time until the next slot starts.
-// Returns the slot object or null.
-function getCurrentSlot(slots) {
-  if (!slots || !slots.length) return null;
-  const now = nowHHMM();
-  // Get unique sorted times
-  const times = [...new Set(slots.map(s => s.time))].sort();
-  let activeTime = null;
-  for (let i = 0; i < times.length; i++) {
-    const start = times[i];
-    const end   = times[i + 1] || "23:59";
-    if (now >= start && now < end) { activeTime = start; break; }
-  }
-  if (!activeTime) return null;
-  // If dual day, prefer Room A for the banner (both are "current")
-  const matches = slots.filter(s => s.time === activeTime && s.className);
-  return matches[0] || null;
-}
-
-// Returns all slots at the current time (for dual days, both rooms)
 function getCurrentSlots(slots) {
   if (!slots || !slots.length) return [];
   const now = nowHHMM();
@@ -231,15 +205,17 @@ function getCurrentSlots(slots) {
   if (!activeTime) return [];
   return slots.filter(s => s.time === activeTime && s.className);
 }
+
+// ── Primitive UI ──────────────────────────────────────────────────────────────
 const Btn = ({ children, onClick, variant = "primary", small, disabled, full, style: s = {} }) => {
   const variants = {
-    primary: { bg: C.forest,     col: C.white,   bdr: "none" },
-    ghost:   { bg: "transparent", col: C.text,   bdr: `1.5px solid ${C.border}` },
-    danger:  { bg: C.coralBg,    col: C.coral,   bdr: `1.5px solid ${C.coral}` },
-    green:   { bg: C.greenBg,    col: C.green,   bdr: `1.5px solid ${C.green}` },
-    purple:  { bg: C.purpleBg,   col: C.purple,  bdr: `1.5px solid ${C.purple}` },
-    amber:   { bg: C.amberBg,    col: C.amber,   bdr: `1.5px solid ${C.amber}` },
-    dim:     { bg: C.bg,         col: C.textDim, bdr: `1.5px solid ${C.border}` },
+    primary: { bg: C.forest,      col: C.white,   bdr: "none" },
+    ghost:   { bg: "transparent", col: C.text,    bdr: `1.5px solid ${C.border}` },
+    danger:  { bg: C.coralBg,     col: C.coral,   bdr: `1.5px solid ${C.coral}` },
+    green:   { bg: C.greenBg,     col: C.green,   bdr: `1.5px solid ${C.green}` },
+    purple:  { bg: C.purpleBg,    col: C.purple,  bdr: `1.5px solid ${C.purple}` },
+    amber:   { bg: C.amberBg,     col: C.amber,   bdr: `1.5px solid ${C.amber}` },
+    dim:     { bg: C.bg,          col: C.textDim, bdr: `1.5px solid ${C.border}` },
   }[variant] || {};
   return (
     <button onClick={onClick} disabled={disabled} style={{
@@ -287,13 +263,12 @@ const LightInput = ({ label, value, onChange, placeholder, type = "text" }) => (
   </div>
 );
 
-// ── Sync status indicator ─────────────────────────────────────────────────────
 function SyncBadge({ status }) {
   const cfg = {
-    saving:  { col: C.amber,  label: "Saving…" },
-    saved:   { col: C.green,  label: "✓ Saved" },
-    error:   { col: C.coral,  label: "⚠ Save failed" },
-    loading: { col: C.muted,  label: "Loading…" },
+    saving:  { col: C.amber, label: "Saving…" },
+    saved:   { col: C.green, label: "✓ Saved" },
+    error:   { col: C.coral, label: "⚠ Save failed" },
+    loading: { col: C.muted, label: "Loading…" },
   }[status] || {};
   return (
     <span style={{ fontFamily: MONO, fontSize: 11, color: cfg.col, fontWeight: 600, letterSpacing: .5 }}>
@@ -305,14 +280,14 @@ function SyncBadge({ status }) {
 // ── Student Mark ──────────────────────────────────────────────────────────────
 function StudentMark({ name, mark, onChange }) {
   const cfg = {
-    positive: { bg: C.greenBg,  col: C.green,  border: C.green  },
-    negative: { bg: C.coralBg,  col: C.coral,  border: C.coral  },
-    flag:     { bg: C.amberBg,  col: C.amber,  border: C.amber  },
-    absent:   { bg: "#F3F4F6",  col: "#6B7280", border: "#9CA3AF" },
-    none:     { bg: "transparent", col: C.muted, border: C.border },
+    positive: { bg: C.greenBg,       col: C.green,   border: C.green   },
+    negative: { bg: C.coralBg,       col: C.coral,   border: C.coral   },
+    flag:     { bg: C.amberBg,       col: C.amber,   border: C.amber   },
+    absent:   { bg: "#F3F4F6",       col: "#6B7280", border: "#9CA3AF" },
+    none:     { bg: "transparent",   col: C.muted,   border: C.border  },
   };
-  const toggle = (type) => onChange(mark === type ? "none" : type);
-  const active = cfg[mark] || cfg.none;
+  const toggle  = (type) => onChange(mark === type ? "none" : type);
+  const active  = cfg[mark] || cfg.none;
   const isAbsent = mark === "absent";
 
   return (
@@ -328,9 +303,7 @@ function StudentMark({ name, mark, onChange }) {
         fontSize: 14, fontWeight: 600,
         color: mark !== "none" ? active.col : C.text,
         textDecoration: isAbsent ? "line-through" : "none",
-      }}>
-        {name}
-      </span>
+      }}>{name}</span>
       <div style={{ display: "flex", gap: 5 }}>
         {[
           { type: "positive", icon: "✓",  title: "Positive" },
@@ -561,7 +534,6 @@ function TemplateBuilder({ weekTemplates, onSave, onClose }) {
           onClose={() => setEditingSlot(null)}
         />
       )}
-
       <div className="slide-up" style={{
         background:C.surface, border:`1.5px solid ${C.border}`,
         borderRadius:18, width:"100%", maxWidth:680,
@@ -715,7 +687,7 @@ function SlotCard({ slot, report, onLog, onEditTemplate, isCurrent }) {
           )}
         </div>
         {hasReport && !isCurrent && <span style={{ fontSize:10, color:C.green, fontWeight:800, letterSpacing:.5 }}>✓ LOGGED</span>}
-        {hasReport && isCurrent && <span style={{ fontSize:10, color:C.amberBg, fontWeight:800, letterSpacing:.5 }}>✓ LOGGED</span>}
+        {hasReport &&  isCurrent && <span style={{ fontSize:10, color:C.amberBg, fontWeight:800, letterSpacing:.5 }}>✓ LOGGED</span>}
       </div>
 
       <div style={{ padding:"12px 14px" }}>
@@ -746,13 +718,15 @@ function SlotCard({ slot, report, onLog, onEditTemplate, isCurrent }) {
                     positive:{ bg:C.greenBg, col:C.green },
                     negative:{ bg:C.coralBg, col:C.coral },
                     flag:    { bg:C.amberBg, col:C.amber },
+                    absent:  { bg:"#F3F4F6", col:"#6B7280" },
                     none:    { bg:C.bg,      col:C.textDim },
-                  }[mark];
+                  }[mark] || { bg:C.bg, col:C.textDim };
                   return (
                     <span key={name} style={{
                       padding:"2px 9px", borderRadius:99, fontSize:11, fontWeight:600,
                       background:mc.bg, color:mc.col,
                       border:`1px solid ${mark !== "none" ? mc.col+"44" : C.border}`,
+                      textDecoration: mark === "absent" ? "line-through" : "none",
                     }}>{name}</span>
                   );
                 })}
@@ -824,19 +798,13 @@ function DayStats({ slots, dayReports }) {
   );
 }
 
-// ── Class types (for analytics grouping) ─────────────────────────────────────
-const CLASS_TYPES = ["Kids Class", "KPT", "Mini Kids / Playgroup B", "EWS", "Other"];
-
 // ── Analytics helpers ─────────────────────────────────────────────────────────
-
-// Parse "YYYY-MM-DD_slotId" → { date, slotId }
 function parseReportId(id) {
   const match = id.match(/^(\d{4}-\d{2}-\d{2})_(.+)$/);
   if (!match) return null;
   return { date: match[1], slotId: match[2] };
 }
 
-// Given raw report rows and templates, build enriched records
 function buildAnalyticsRecords(rows, weekTemplates) {
   const records = [];
   rows.forEach(row => {
@@ -849,20 +817,19 @@ function buildAnalyticsRecords(rows, weekTemplates) {
     if (!slot || !slot.className) return;
     records.push({
       date, slotId, dow,
-      className:   slot.className,
-      room:        slot.room,
-      time:        slot.time,
-      classType:   slot.classType || "Other",
-      level:       slot.level     || "—",
+      className:    slot.className,
+      room:         slot.room,
+      time:         slot.time,
+      classType:    slot.classType || "Other",
+      level:        slot.level     || "—",
       studentNames: slot.studentNames || [],
-      report:      row.data,
-      savedAt:     row.saved_at,
+      report:       row.data,
+      savedAt:      row.saved_at,
     });
   });
   return records;
 }
 
-// Aggregate mood/engagement/performance counts from records
 function aggregateCounts(records, field, options) {
   const counts = {};
   options.forEach(o => counts[o] = 0);
@@ -873,7 +840,6 @@ function aggregateCounts(records, field, options) {
   return counts;
 }
 
-// Per-student stats across records
 function buildStudentProfiles(records) {
   const profiles = {};
   records.forEach(rec => {
@@ -895,7 +861,6 @@ function buildStudentProfiles(records) {
   return Object.values(profiles).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-// Date range helpers
 function isoWeekRange(offset = 0) {
   const now = new Date();
   const day = now.getDay();
@@ -903,8 +868,8 @@ function isoWeekRange(offset = 0) {
   mon.setDate(now.getDate() - (day === 0 ? 6 : day - 1) + offset * 7);
   const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
   return {
-    from: mon.toISOString().slice(0, 10),
-    to:   sun.toISOString().slice(0, 10),
+    from:  mon.toISOString().slice(0, 10),
+    to:    sun.toISOString().slice(0, 10),
     label: offset === 0 ? "This Week" : offset === -1 ? "Last Week" : `${Math.abs(offset)}w ago`,
   };
 }
@@ -924,7 +889,6 @@ function monthRange(offset = 0) {
 
 // ── SVG Pie Chart ─────────────────────────────────────────────────────────────
 function PieChart({ data, size = 140 }) {
-  // data: [{ label, value, color }]
   const total = data.reduce((s, d) => s + d.value, 0);
   if (total === 0) return (
     <div style={{ width: size, height: size, borderRadius: "50%",
@@ -933,7 +897,7 @@ function PieChart({ data, size = 140 }) {
     </div>
   );
 
-  let cumAngle = -90; // start at top
+  let cumAngle = -90;
   const slices = data.map(d => {
     const pct   = d.value / total;
     const angle = pct * 360;
@@ -957,7 +921,6 @@ function PieChart({ data, size = 140 }) {
         const start = toXY(s.startAngle, r);
         const end   = toXY(s.endAngle,   r);
         const large = (s.endAngle - s.startAngle) > 180 ? 1 : 0;
-        // If 100%, draw circle
         if (s.pct >= 0.9999) {
           return <circle key={i} cx={cx} cy={cy} r={r} fill={s.color} />;
         }
@@ -968,7 +931,6 @@ function PieChart({ data, size = 140 }) {
           />
         );
       })}
-      {/* Centre hole */}
       <circle cx={cx} cy={cy} r={22} fill={C.surface} />
       <text x={cx} y={cy - 4} textAnchor="middle" fontSize="10" fontWeight="700" fill={C.text}>{total}</text>
       <text x={cx} y={cy + 8} textAnchor="middle" fontSize="7" fill={C.muted}>classes</text>
@@ -976,7 +938,6 @@ function PieChart({ data, size = 140 }) {
   );
 }
 
-// ── Pie Legend ────────────────────────────────────────────────────────────────
 function PieLegend({ data, total }) {
   return (
     <div style={{ display: "grid", gap: 5 }}>
@@ -994,7 +955,6 @@ function PieLegend({ data, total }) {
   );
 }
 
-// ── Metric Card with Pie ──────────────────────────────────────────────────────
 function MetricPie({ title, data }) {
   const total = data.reduce((s, d) => s + d.value, 0);
   return (
@@ -1009,31 +969,24 @@ function MetricPie({ title, data }) {
   );
 }
 
-// ── Student Profile Card ──────────────────────────────────────────────────────
 function StudentProfileCard({ profile }) {
   const attended = profile.classes - profile.absent;
   const attPct   = profile.classes > 0 ? Math.round(attended / profile.classes * 100) : 0;
   const posPct   = attended > 0 ? Math.round(profile.positive / attended * 100) : 0;
-
   const barColor = posPct >= 60 ? C.green : posPct >= 30 ? C.amber : C.coral;
 
   return (
-    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10,
-      padding: "14px 16px" }}>
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "14px 16px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
         <div>
           <p style={{ fontWeight: 700, fontSize: 15, color: C.forest }}>{profile.name}</p>
-          <p style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
-            {[...profile.classNames].join(", ")}
-          </p>
+          <p style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{[...profile.classNames].join(", ")}</p>
         </div>
         <div style={{ textAlign: "right" }}>
           <p style={{ fontFamily: MONO, fontSize: 18, fontWeight: 700, color: C.forest }}>{attPct}%</p>
           <p style={{ fontSize: 10, color: C.muted }}>attendance</p>
         </div>
       </div>
-
-      {/* Positive rate bar */}
       <div style={{ marginBottom: 8 }}>
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
           <span style={{ fontSize: 11, color: C.textDim }}>Positive rate</span>
@@ -1044,18 +997,14 @@ function StudentProfileCard({ profile }) {
             borderRadius: 99, transition: "width .4s ease" }} />
         </div>
       </div>
-
-      {/* Mark counts */}
       <div style={{ display: "flex", gap: 8, fontSize: 11 }}>
         {[
-          { icon: "✓", val: profile.positive, col: C.green  },
-          { icon: "✗", val: profile.negative, col: C.coral  },
-          { icon: "🚩",val: profile.flag,     col: C.amber  },
-          { icon: "○", val: profile.absent,   col: C.muted  },
+          { icon: "✓",  val: profile.positive, col: C.green },
+          { icon: "✗",  val: profile.negative, col: C.coral },
+          { icon: "🚩", val: profile.flag,     col: C.amber },
+          { icon: "○",  val: profile.absent,   col: C.muted },
         ].map(({ icon, val, col }) => (
-          <span key={icon} style={{ color: col, fontWeight: 700, fontFamily: MONO }}>
-            {icon} {val}
-          </span>
+          <span key={icon} style={{ color: col, fontWeight: 700, fontFamily: MONO }}>{icon} {val}</span>
         ))}
         <span style={{ color: C.muted, marginLeft: "auto" }}>{profile.classes} logged</span>
       </div>
@@ -1067,11 +1016,11 @@ function StudentProfileCard({ profile }) {
 function AnalyticsView({ weekTemplates, onClose }) {
   const [loading,     setLoading]     = useState(true);
   const [records,     setRecords]     = useState([]);
-  const [rangeMode,   setRangeMode]   = useState("week"); // week | month
+  const [rangeMode,   setRangeMode]   = useState("week");
   const [rangeOffset, setRangeOffset] = useState(0);
   const [filterType,  setFilterType]  = useState("All");
   const [filterClass, setFilterClass] = useState("All");
-  const [activeTab,   setActiveTab]   = useState("overview"); // overview | classes | students
+  const [activeTab,   setActiveTab]   = useState("overview");
   const [searchName,  setSearchName]  = useState("");
 
   const range = rangeMode === "week" ? isoWeekRange(rangeOffset) : monthRange(rangeOffset);
@@ -1084,53 +1033,39 @@ function AnalyticsView({ weekTemplates, onClose }) {
     }).catch(() => setLoading(false));
   }, [range.from, range.to]);
 
-  // Filter records
   const filtered = records.filter(r => {
-    if (filterType  !== "All" && r.classType  !== filterType)  return false;
-    if (filterClass !== "All" && r.className  !== filterClass) return false;
+    if (filterType  !== "All" && r.classType !== filterType)  return false;
+    if (filterClass !== "All" && r.className !== filterClass) return false;
     return true;
   });
 
   const allClassNames = [...new Set(records.map(r => r.className))].sort();
 
-  // Pie data builders
-  const moodData = [
-    { label: MOODS[0], value: aggregateCounts(filtered, "mood", MOODS)[MOODS[0]], color: "#059669" },
-    { label: MOODS[1], value: aggregateCounts(filtered, "mood", MOODS)[MOODS[1]], color: "#34D399" },
-    { label: MOODS[2], value: aggregateCounts(filtered, "mood", MOODS)[MOODS[2]], color: "#FCD34D" },
-    { label: MOODS[3], value: aggregateCounts(filtered, "mood", MOODS)[MOODS[3]], color: "#F97316" },
-    { label: MOODS[4], value: aggregateCounts(filtered, "mood", MOODS)[MOODS[4]], color: "#EF4444" },
-  ];
-  const engData = [
-    { label: ENGAGEMENT[0], value: aggregateCounts(filtered, "engagement", ENGAGEMENT)[ENGAGEMENT[0]], color: "#059669" },
-    { label: ENGAGEMENT[1], value: aggregateCounts(filtered, "engagement", ENGAGEMENT)[ENGAGEMENT[1]], color: "#34D399" },
-    { label: ENGAGEMENT[2], value: aggregateCounts(filtered, "engagement", ENGAGEMENT)[ENGAGEMENT[2]], color: "#FCD34D" },
-    { label: ENGAGEMENT[3], value: aggregateCounts(filtered, "engagement", ENGAGEMENT)[ENGAGEMENT[3]], color: "#F97316" },
-    { label: ENGAGEMENT[4], value: aggregateCounts(filtered, "engagement", ENGAGEMENT)[ENGAGEMENT[4]], color: "#EF4444" },
-  ];
-  const perfData = [
-    { label: PERFORMANCE[0], value: aggregateCounts(filtered, "performance", PERFORMANCE)[PERFORMANCE[0]], color: "#059669" },
-    { label: PERFORMANCE[1], value: aggregateCounts(filtered, "performance", PERFORMANCE)[PERFORMANCE[1]], color: "#34D399" },
-    { label: PERFORMANCE[2], value: aggregateCounts(filtered, "performance", PERFORMANCE)[PERFORMANCE[2]], color: "#FCD34D" },
-    { label: PERFORMANCE[3], value: aggregateCounts(filtered, "performance", PERFORMANCE)[PERFORMANCE[3]], color: "#F97316" },
-    { label: PERFORMANCE[4], value: aggregateCounts(filtered, "performance", PERFORMANCE)[PERFORMANCE[4]], color: "#6B7280" },
-  ];
+  const makePieData = (recs, field, options, colors) =>
+    options.map((o, i) => ({ label: o, value: aggregateCounts(recs, field, options)[o], color: colors[i] }));
 
-  // Per-class breakdown
+  const PIE_COLORS = ["#059669","#34D399","#FCD34D","#F97316","#EF4444"];
+  const PERF_COLORS = ["#059669","#34D399","#FCD34D","#F97316","#6B7280"];
+
+  const moodData = makePieData(filtered, "mood",        MOODS,       PIE_COLORS);
+  const engData  = makePieData(filtered, "engagement",  ENGAGEMENT,  PIE_COLORS);
+  const perfData = makePieData(filtered, "performance", PERFORMANCE, PERF_COLORS);
+
   const classBreakdown = allClassNames.map(cn => {
     const recs = filtered.filter(r => r.className === cn);
     const allMarks = recs.flatMap(r => Object.values(r.report?.marks || {}));
-    const pos = allMarks.filter(m => m === "positive").length;
-    const neg = allMarks.filter(m => m === "negative").length;
-    const fl  = allMarks.filter(m => m === "flag").length;
-    const abs = allMarks.filter(m => m === "absent").length;
-    const total = allMarks.length;
-    return { className: cn, classType: recs[0]?.classType || "Other",
-      count: recs.length, pos, neg, fl, abs, total };
+    return {
+      className: cn, classType: recs[0]?.classType || "Other", count: recs.length,
+      pos: allMarks.filter(m => m === "positive").length,
+      neg: allMarks.filter(m => m === "negative").length,
+      fl:  allMarks.filter(m => m === "flag").length,
+      abs: allMarks.filter(m => m === "absent").length,
+      total: allMarks.length,
+      recs,
+    };
   }).filter(c => c.count > 0);
 
-  // Student profiles
-  const students = buildStudentProfiles(filtered);
+  const students        = buildStudentProfiles(filtered);
   const filteredStudents = searchName
     ? students.filter(s => s.name.toLowerCase().includes(searchName.toLowerCase()))
     : students;
@@ -1145,18 +1080,13 @@ function AnalyticsView({ weekTemplates, onClose }) {
   );
 
   return (
-    <div className="fade-in" style={{
-      position: "fixed", inset: 0, background: C.bg, zIndex: 2000,
-      overflowY: "auto",
-    }}>
+    <div className="fade-in" style={{ position: "fixed", inset: 0, background: C.bg, zIndex: 2000, overflowY: "auto" }}>
       <div style={{ maxWidth: 960, margin: "0 auto", padding: "24px 16px 56px" }}>
 
-        {/* Header */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start",
           marginBottom: 24, paddingBottom: 20, borderBottom: `1.5px solid ${C.border}` }}>
           <div>
-            <p style={{ fontFamily: MONO, fontSize: 10, color: C.purple, letterSpacing: 2,
-              fontWeight: 700, marginBottom: 4 }}>ANALYTICS</p>
+            <p style={{ fontFamily: MONO, fontSize: 10, color: C.purple, letterSpacing: 2, fontWeight: 700, marginBottom: 4 }}>ANALYTICS</p>
             <h1 style={{ fontFamily: SERIF, fontSize: 26, color: C.forest }}>
               KANA <span style={{ color: C.amber, fontStyle: "italic" }}>Reports</span>
             </h1>
@@ -1164,11 +1094,8 @@ function AnalyticsView({ weekTemplates, onClose }) {
           <Btn variant="ghost" small onClick={onClose}>← Back to Log</Btn>
         </div>
 
-        {/* Range controls */}
         <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap", alignItems: "center" }}>
-          {/* Week / Month toggle */}
-          <div style={{ display: "flex", background: C.surface, border: `1px solid ${C.border}`,
-            borderRadius: 9, overflow: "hidden" }}>
+          <div style={{ display: "flex", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 9, overflow: "hidden" }}>
             {["week","month"].map(m => (
               <button key={m} onClick={() => { setRangeMode(m); setRangeOffset(0); }} style={{
                 padding: "6px 16px", border: "none", fontWeight: 700, fontSize: 13, cursor: "pointer",
@@ -1177,38 +1104,21 @@ function AnalyticsView({ weekTemplates, onClose }) {
               }}>{m === "week" ? "Weekly" : "Monthly"}</button>
             ))}
           </div>
-
-          {/* Prev / label / Next */}
-          <button onClick={() => setRangeOffset(o => o - 1)} style={{
-            background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7,
-            padding: "6px 12px", cursor: "pointer", fontSize: 16, color: C.text }}>‹</button>
-          <span style={{ fontFamily: SERIF, fontSize: 16, color: C.forest, minWidth: 160, textAlign: "center" }}>
-            {range.label}
-          </span>
-          <button onClick={() => setRangeOffset(o => Math.min(o + 1, 0))} style={{
-            background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7,
-            padding: "6px 12px", cursor: "pointer", fontSize: 16, color: C.text,
-            opacity: rangeOffset >= 0 ? .4 : 1 }} disabled={rangeOffset >= 0}>›</button>
-
-          {/* Filters */}
-          <select value={filterType} onChange={e => setFilterType(e.target.value)} style={{
-            background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7,
-            padding: "6px 10px", fontSize: 13, color: C.text, cursor: "pointer" }}>
+          <button onClick={() => setRangeOffset(o => o - 1)} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7, padding: "6px 12px", cursor: "pointer", fontSize: 16, color: C.text }}>‹</button>
+          <span style={{ fontFamily: SERIF, fontSize: 16, color: C.forest, minWidth: 160, textAlign: "center" }}>{range.label}</span>
+          <button onClick={() => setRangeOffset(o => Math.min(o + 1, 0))} disabled={rangeOffset >= 0}
+            style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7, padding: "6px 12px", cursor: "pointer", fontSize: 16, color: C.text, opacity: rangeOffset >= 0 ? .4 : 1 }}>›</button>
+          <select value={filterType} onChange={e => setFilterType(e.target.value)} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7, padding: "6px 10px", fontSize: 13, color: C.text, cursor: "pointer" }}>
             <option value="All">All class types</option>
             {CLASS_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
-
-          <select value={filterClass} onChange={e => setFilterClass(e.target.value)} style={{
-            background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7,
-            padding: "6px 10px", fontSize: 13, color: C.text, cursor: "pointer" }}>
+          <select value={filterClass} onChange={e => setFilterClass(e.target.value)} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7, padding: "6px 10px", fontSize: 13, color: C.text, cursor: "pointer" }}>
             <option value="All">All classes</option>
             {allClassNames.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
         </div>
 
-        {/* Summary stats */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))",
-          gap: 10, marginBottom: 24 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 10, marginBottom: 24 }}>
           {[
             { label: "Classes logged", value: filtered.length, col: C.forest },
             { label: "Total students", value: [...new Set(filtered.flatMap(r => r.studentNames))].length, col: C.purple },
@@ -1216,26 +1126,22 @@ function AnalyticsView({ weekTemplates, onClose }) {
             { label: "Positive marks", value: filtered.flatMap(r => Object.values(r.report?.marks || {})).filter(m => m === "positive").length, col: C.green },
             { label: "Flags",          value: filtered.flatMap(r => Object.values(r.report?.marks || {})).filter(m => m === "flag").length, col: C.amber },
           ].map(s => (
-            <div key={s.label} style={{ background: C.surface, border: `1px solid ${C.border}`,
-              borderRadius: 10, padding: "12px 14px", textAlign: "center" }}>
+            <div key={s.label} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 14px", textAlign: "center" }}>
               <p style={{ fontFamily: SERIF, fontSize: 24, fontWeight: 700, color: s.col }}>{s.value}</p>
               <p style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>{s.label}</p>
             </div>
           ))}
         </div>
 
-        {/* Tabs */}
-        <div style={{ display: "flex", gap: 4, marginBottom: 20, background: C.surface,
-          padding: 5, borderRadius: 10, border: `1px solid ${C.border}`, width: "fit-content" }}>
-          <Tab id="overview"  label="Overview"  />
-          <Tab id="classes"   label="By Class"  />
-          <Tab id="students"  label="Students"  />
+        <div style={{ display: "flex", gap: 4, marginBottom: 20, background: C.surface, padding: 5, borderRadius: 10, border: `1px solid ${C.border}`, width: "fit-content" }}>
+          <Tab id="overview" label="Overview" />
+          <Tab id="classes"  label="By Class" />
+          <Tab id="students" label="Students" />
         </div>
 
         {loading ? (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 60, gap: 12 }}>
-            <div className="spin" style={{ width: 28, height: 28, border: `3px solid ${C.border}`,
-              borderTopColor: C.forest, borderRadius: "50%" }} />
+            <div className="spin" style={{ width: 28, height: 28, border: `3px solid ${C.border}`, borderTopColor: C.forest, borderRadius: "50%" }} />
             <span style={{ fontFamily: MONO, fontSize: 13, color: C.muted }}>Loading data…</span>
           </div>
         ) : filtered.length === 0 ? (
@@ -1245,79 +1151,43 @@ function AnalyticsView({ weekTemplates, onClose }) {
           </div>
         ) : (
           <>
-            {/* ── OVERVIEW TAB ── */}
             {activeTab === "overview" && (
-              <div style={{ display: "grid", gap: 16 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
-                  <MetricPie title="Class Mood" data={moodData} />
-                  <MetricPie title="Student Engagement" data={engData} />
-                  <MetricPie title="Lesson Performance" data={perfData} />
-                </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
+                <MetricPie title="Class Mood"         data={moodData} />
+                <MetricPie title="Student Engagement" data={engData}  />
+                <MetricPie title="Lesson Performance" data={perfData} />
               </div>
             )}
 
-            {/* ── BY CLASS TAB ── */}
             {activeTab === "classes" && (
               <div style={{ display: "grid", gap: 12 }}>
                 {classBreakdown.map(c => {
-                  const classRecs = filtered.filter(r => r.className === c.className);
-                  const cMood = [
-                    { label: MOODS[0], value: aggregateCounts(classRecs, "mood", MOODS)[MOODS[0]], color: "#059669" },
-                    { label: MOODS[1], value: aggregateCounts(classRecs, "mood", MOODS)[MOODS[1]], color: "#34D399" },
-                    { label: MOODS[2], value: aggregateCounts(classRecs, "mood", MOODS)[MOODS[2]], color: "#FCD34D" },
-                    { label: MOODS[3], value: aggregateCounts(classRecs, "mood", MOODS)[MOODS[3]], color: "#F97316" },
-                    { label: MOODS[4], value: aggregateCounts(classRecs, "mood", MOODS)[MOODS[4]], color: "#EF4444" },
-                  ];
-                  const cEng = [
-                    { label: ENGAGEMENT[0], value: aggregateCounts(classRecs, "engagement", ENGAGEMENT)[ENGAGEMENT[0]], color: "#059669" },
-                    { label: ENGAGEMENT[1], value: aggregateCounts(classRecs, "engagement", ENGAGEMENT)[ENGAGEMENT[1]], color: "#34D399" },
-                    { label: ENGAGEMENT[2], value: aggregateCounts(classRecs, "engagement", ENGAGEMENT)[ENGAGEMENT[2]], color: "#FCD34D" },
-                    { label: ENGAGEMENT[3], value: aggregateCounts(classRecs, "engagement", ENGAGEMENT)[ENGAGEMENT[3]], color: "#F97316" },
-                    { label: ENGAGEMENT[4], value: aggregateCounts(classRecs, "engagement", ENGAGEMENT)[ENGAGEMENT[4]], color: "#EF4444" },
-                  ];
-                  const cPerf = [
-                    { label: PERFORMANCE[0], value: aggregateCounts(classRecs, "performance", PERFORMANCE)[PERFORMANCE[0]], color: "#059669" },
-                    { label: PERFORMANCE[1], value: aggregateCounts(classRecs, "performance", PERFORMANCE)[PERFORMANCE[1]], color: "#34D399" },
-                    { label: PERFORMANCE[2], value: aggregateCounts(classRecs, "performance", PERFORMANCE)[PERFORMANCE[2]], color: "#FCD34D" },
-                    { label: PERFORMANCE[3], value: aggregateCounts(classRecs, "performance", PERFORMANCE)[PERFORMANCE[3]], color: "#F97316" },
-                    { label: PERFORMANCE[4], value: aggregateCounts(classRecs, "performance", PERFORMANCE)[PERFORMANCE[4]], color: "#6B7280" },
-                  ];
+                  const cMood = makePieData(c.recs, "mood",        MOODS,       PIE_COLORS);
+                  const cEng  = makePieData(c.recs, "engagement",  ENGAGEMENT,  PIE_COLORS);
+                  const cPerf = makePieData(c.recs, "performance", PERFORMANCE, PERF_COLORS);
                   const posPct = c.total > 0 ? Math.round(c.pos / c.total * 100) : 0;
                   return (
-                    <div key={c.className} style={{ background: C.surface, border: `1px solid ${C.border}`,
-                      borderRadius: 12, padding: 20, borderLeft: `4px solid ${C.amber}` }}>
+                    <div key={c.className} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20, borderLeft: `4px solid ${C.amber}` }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
                         <div>
                           <h3 style={{ fontFamily: SERIF, fontSize: 18, color: C.forest }}>{c.className}</h3>
-                          <p style={{ fontSize: 12, color: C.muted, marginTop: 3 }}>
-                            {c.count} session{c.count !== 1 ? "s" : ""} logged · {c.classType}
-                          </p>
+                          <p style={{ fontSize: 12, color: C.muted, marginTop: 3 }}>{c.count} session{c.count !== 1 ? "s" : ""} · {c.classType}</p>
                         </div>
                         <div style={{ textAlign: "right" }}>
-                          <p style={{ fontFamily: MONO, fontSize: 20, fontWeight: 700,
-                            color: posPct >= 60 ? C.green : posPct >= 30 ? C.amber : C.coral }}>
-                            {posPct}%
-                          </p>
+                          <p style={{ fontFamily: MONO, fontSize: 20, fontWeight: 700, color: posPct >= 60 ? C.green : posPct >= 30 ? C.amber : C.coral }}>{posPct}%</p>
                           <p style={{ fontSize: 10, color: C.muted }}>positive marks</p>
                         </div>
                       </div>
-                      {/* Student mark summary */}
                       <div style={{ display: "flex", gap: 12, marginBottom: 16, fontSize: 12 }}>
-                        <span style={{ color: C.green,  fontWeight: 700 }}>✓ {c.pos}</span>
-                        <span style={{ color: C.coral,  fontWeight: 700 }}>✗ {c.neg}</span>
-                        <span style={{ color: C.amber,  fontWeight: 700 }}>🚩 {c.fl}</span>
-                        <span style={{ color: C.muted,  fontWeight: 700 }}>○ {c.abs} absent</span>
+                        <span style={{ color: C.green, fontWeight: 700 }}>✓ {c.pos}</span>
+                        <span style={{ color: C.coral, fontWeight: 700 }}>✗ {c.neg}</span>
+                        <span style={{ color: C.amber, fontWeight: 700 }}>🚩 {c.fl}</span>
+                        <span style={{ color: C.muted, fontWeight: 700 }}>○ {c.abs} absent</span>
                       </div>
-                      {/* 3 mini pies */}
                       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-                        {[
-                          { title: "Mood", data: cMood },
-                          { title: "Engagement", data: cEng },
-                          { title: "Performance", data: cPerf },
-                        ].map(({ title, data }) => (
+                        {[{ title: "Mood", data: cMood }, { title: "Engagement", data: cEng }, { title: "Performance", data: cPerf }].map(({ title, data }) => (
                           <div key={title}>
-                            <p style={{ fontSize: 11, fontWeight: 700, color: C.muted,
-                              textTransform: "uppercase", letterSpacing: .8, marginBottom: 8 }}>{title}</p>
+                            <p style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: .8, marginBottom: 8 }}>{title}</p>
                             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                               <PieChart data={data} size={80} />
                               <div style={{ display: "grid", gap: 3 }}>
@@ -1326,9 +1196,7 @@ function AnalyticsView({ weekTemplates, onClose }) {
                                   return (
                                     <div key={d.label} style={{ display: "flex", alignItems: "center", gap: 5 }}>
                                       <div style={{ width: 7, height: 7, borderRadius: 2, background: d.color }} />
-                                      <span style={{ fontSize: 10, color: C.muted }}>
-                                        {t > 0 ? Math.round(d.value / t * 100) : 0}%
-                                      </span>
+                                      <span style={{ fontSize: 10, color: C.muted }}>{t > 0 ? Math.round(d.value / t * 100) : 0}%</span>
                                     </div>
                                   );
                                 })}
@@ -1343,15 +1211,12 @@ function AnalyticsView({ weekTemplates, onClose }) {
               </div>
             )}
 
-            {/* ── STUDENTS TAB ── */}
             {activeTab === "students" && (
               <div>
                 <div style={{ marginBottom: 16 }}>
                   <input value={searchName} onChange={e => setSearchName(e.target.value)}
                     placeholder="Search student name…"
-                    style={{ width: "100%", maxWidth: 300, background: C.surface,
-                      border: `1.5px solid ${C.border}`, borderRadius: 8,
-                      padding: "8px 12px", fontSize: 14, color: C.text, outline: "none" }}
+                    style={{ width: "100%", maxWidth: 300, background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", fontSize: 14, color: C.text, outline: "none" }}
                     onFocus={e => e.target.style.borderColor = C.forest}
                     onBlur={e => e.target.style.borderColor = C.border} />
                   <span style={{ fontSize: 12, color: C.muted, marginLeft: 12 }}>
@@ -1382,13 +1247,11 @@ function App() {
   const [syncStatus,    setSyncStatus]    = useState(null);
   const [liveTime,      setLiveTime]      = useState(nowHHMM());
 
-  // Live clock — ticks every 30 seconds
   useEffect(() => {
     const t = setInterval(() => setLiveTime(nowHHMM()), 30000);
     return () => clearInterval(t);
   }, []);
 
-  // ── Initial load ────────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
       try {
@@ -1403,7 +1266,6 @@ function App() {
     })();
   }, []);
 
-  // ── Reload reports when date changes ────────────────────────────────────────
   useEffect(() => {
     if (appStatus !== "ready" && appStatus !== "error") return;
     (async () => {
@@ -1417,7 +1279,6 @@ function App() {
     })();
   }, [date, appStatus]);
 
-  // ── Save report ─────────────────────────────────────────────────────────────
   const handleSaveReport = async (slot, report) => {
     setSyncStatus("saving");
     try {
@@ -1432,7 +1293,6 @@ function App() {
     }
   };
 
-  // ── Save templates ──────────────────────────────────────────────────────────
   const handleSaveTemplates = async (templates) => {
     setSyncStatus("saving");
     try {
@@ -1447,22 +1307,19 @@ function App() {
     }
   };
 
-  // ── Loading screen ──────────────────────────────────────────────────────────
   if (appStatus === "loading") {
     return (
-      <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
-        height:"100vh", background:C.bg, gap:16 }}>
+      <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"100vh", background:C.bg, gap:16 }}>
         <style>{css}</style>
-        <div className="spin" style={{ width:32, height:32, border:`3px solid ${C.border}`,
-          borderTopColor:C.forest, borderRadius:"50%" }} />
+        <div className="spin" style={{ width:32, height:32, border:`3px solid ${C.border}`, borderTopColor:C.forest, borderRadius:"50%" }} />
         <p style={{ fontFamily:MONO, fontSize:13, color:C.muted, letterSpacing:1 }}>Loading from cloud…</p>
       </div>
     );
   }
 
-  const dow   = dayName(date);
-  const slots = (weekTemplates || buildWeekTemplates())[dow] || buildTemplate(dow);
-  const isToday = date === todayStr();
+  const dow          = dayName(date);
+  const slots        = (weekTemplates || buildWeekTemplates())[dow] || buildTemplate(dow);
+  const isToday      = date === todayStr();
   const currentSlots = isToday ? getCurrentSlots(slots) : [];
 
   return (
@@ -1495,7 +1352,6 @@ function App() {
 
       <div style={{ maxWidth:940, margin:"0 auto", padding:"28px 16px 56px", minHeight:"100vh" }}>
 
-        {/* HEADER */}
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
           marginBottom:26, flexWrap:"wrap", gap:12,
           paddingBottom:20, borderBottom:`1.5px solid ${C.border}` }}>
@@ -1512,49 +1368,25 @@ function App() {
           <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
             {syncStatus && <SyncBadge status={syncStatus} />}
             <DayStats slots={slots} dayReports={dayReports} />
-            <Btn variant="purple" small onClick={() => setShowTemplate(true)}>
-              ⚙ Weekly Schedule
-            </Btn>
-            <Btn variant="green" small onClick={() => setShowAnalytics(true)}>
-              📊 Reports
-            </Btn>
+            <Btn variant="purple" small onClick={() => setShowTemplate(true)}>⚙ Weekly Schedule</Btn>
+            <Btn variant="green"  small onClick={() => setShowAnalytics(true)}>📊 Reports</Btn>
           </div>
         </div>
 
-        {/* DATE NAV */}
         <div style={{ marginBottom:22 }}>
           <DateNav date={date} onChange={setDate} />
         </div>
 
-        {/* ── CURRENT CLASS BANNER ── shows only today during active lesson hours */}
         {currentSlots.length > 0 && (
-          <div style={{
-            marginBottom:20, borderRadius:12, overflow:"hidden",
-            border:`2px solid ${C.forest}`,
-            boxShadow:"0 4px 20px rgba(30,58,47,.12)",
-          }}>
-            <div style={{
-              background:C.forest, padding:"10px 18px",
-              display:"flex", justifyContent:"space-between", alignItems:"center",
-            }}>
+          <div style={{ marginBottom:20, borderRadius:12, overflow:"hidden", border:`2px solid ${C.forest}`, boxShadow:"0 4px 20px rgba(30,58,47,.12)" }}>
+            <div style={{ background:C.forest, padding:"10px 18px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
               <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-                <div style={{
-                  width:8, height:8, borderRadius:"50%", background:C.green,
-                  boxShadow:`0 0 0 3px rgba(13,122,71,.3)`,
-                  animation:"pulse 2s ease infinite",
-                }} />
-                <span style={{ fontFamily:MONO, fontSize:11, color:C.amberBg, letterSpacing:2, fontWeight:700 }}>
-                  NOW LIVE
-                </span>
+                <div style={{ width:8, height:8, borderRadius:"50%", background:C.green, boxShadow:`0 0 0 3px rgba(13,122,71,.3)`, animation:"pulse 2s ease infinite" }} />
+                <span style={{ fontFamily:MONO, fontSize:11, color:C.amberBg, letterSpacing:2, fontWeight:700 }}>NOW LIVE</span>
               </div>
-              <span style={{ fontFamily:MONO, fontSize:13, color:C.amberBg, fontWeight:600 }}>
-                {liveTime}
-              </span>
+              <span style={{ fontFamily:MONO, fontSize:13, color:C.amberBg, fontWeight:600 }}>{liveTime}</span>
             </div>
-            <div style={{
-              background:"#F0F7F3", padding:"12px 18px",
-              display:"flex", gap:10, flexWrap:"wrap",
-            }}>
+            <div style={{ background:"#F0F7F3", padding:"12px 18px", display:"flex", gap:10, flexWrap:"wrap" }}>
               {currentSlots.map(slot => (
                 <button key={slot.id} onClick={() => setReportSlot(slot)} style={{
                   flex:1, minWidth:180, padding:"10px 16px", borderRadius:9,
@@ -1577,11 +1409,8 @@ function App() {
                     )}
                   </div>
                   <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                    <span style={{ fontSize:12, color:C.textDim }}>
-                      {slot.studentNames.length} student{slot.studentNames.length !== 1 ? "s" : ""}
-                    </span>
-                    <span style={{ fontSize:12, fontWeight:700,
-                      color: dayReports[slot.id] ? C.green : C.forest }}>
+                    <span style={{ fontSize:12, color:C.textDim }}>{slot.studentNames.length} student{slot.studentNames.length !== 1 ? "s" : ""}</span>
+                    <span style={{ fontSize:12, fontWeight:700, color: dayReports[slot.id] ? C.green : C.forest }}>
                       {dayReports[slot.id] ? "✓ Logged — tap to edit" : "Tap to log →"}
                     </span>
                   </div>
@@ -1591,52 +1420,33 @@ function App() {
           </div>
         )}
 
-        {/* No active class right now but is today */}
         {isToday && currentSlots.length === 0 && slots.filter(s => s.className).length > 0 && (() => {
           const times = [...new Set(slots.map(s => s.time))].sort();
-          const now = nowHHMM();
-          const next = times.find(t => t > now);
+          const now   = nowHHMM();
+          const next  = times.find(t => t > now);
           if (!next) return null;
           const nextSlots = slots.filter(s => s.time === next && s.className);
           if (!nextSlots.length) return null;
           return (
-            <div style={{
-              marginBottom:20, borderRadius:10, padding:"10px 16px",
-              background:C.amberBg, border:`1.5px solid ${C.amber}`,
-              display:"flex", alignItems:"center", gap:10,
-            }}>
-              <span style={{ fontSize:13, color:C.amber, fontFamily:MONO, fontWeight:600 }}>
-                ⏱ Next class at {next}
-              </span>
-              <span style={{ fontSize:13, color:C.textDim }}>
-                — {nextSlots.map(s => s.className + (s.room ? ` (${s.room})` : "")).join(" · ")}
-              </span>
+            <div style={{ marginBottom:20, borderRadius:10, padding:"10px 16px", background:C.amberBg, border:`1.5px solid ${C.amber}`, display:"flex", alignItems:"center", gap:10 }}>
+              <span style={{ fontSize:13, color:C.amber, fontFamily:MONO, fontWeight:600 }}>⏱ Next class at {next}</span>
+              <span style={{ fontSize:13, color:C.textDim }}>— {nextSlots.map(s => s.className + (s.room ? ` (${s.room})` : "")).join(" · ")}</span>
             </div>
           );
         })()}
 
-        {/* DAY LABEL */}
         <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:18 }}>
-          <p style={{ fontFamily:MONO, fontSize:11, color:C.purple, letterSpacing:2, textTransform:"uppercase", fontWeight:600 }}>
-            {dow} Schedule
-          </p>
-          {dow === "Saturday" && (
-            <span style={{ fontSize:11, color:C.amber, fontWeight:600, fontFamily:MONO }}>09:00 – 17:00</span>
-          )}
-          <button onClick={() => setShowTemplate(true)} style={{
-            background:"none", border:`1px solid ${C.border}`, borderRadius:6,
-            padding:"3px 10px", color:C.textDim, fontSize:11, cursor:"pointer",
-          }}>Edit {dow}</button>
+          <p style={{ fontFamily:MONO, fontSize:11, color:C.purple, letterSpacing:2, textTransform:"uppercase", fontWeight:600 }}>{dow} Schedule</p>
+          {dow === "Saturday" && <span style={{ fontSize:11, color:C.amber, fontWeight:600, fontFamily:MONO }}>09:00 – 17:00</span>}
+          <button onClick={() => setShowTemplate(true)} style={{ background:"none", border:`1px solid ${C.border}`, borderRadius:6, padding:"3px 10px", color:C.textDim, fontSize:11, cursor:"pointer" }}>Edit {dow}</button>
         </div>
 
-        {/* SLOT GRID */}
         {isDualDay(dow) ? (() => {
           const times = slotTimesFor(dow);
           return (
             <div style={{ display:"grid", gap:14 }}>
               {times.map(time => {
                 const pair = slots.filter(s => s.time === time);
-                const isCurrent = isToday && currentSlots.some(s => s.time === time);
                 return (
                   <div key={time}>
                     <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
