@@ -128,6 +128,7 @@ const css = `
   @keyframes slideUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
   @keyframes fadeIn  { from { opacity:0; } to { opacity:1; } }
   @keyframes spin    { to { transform: rotate(360deg); } }
+  @keyframes pulse   { 0%,100% { opacity:1; } 50% { opacity:.4; } }
   .slide-up { animation: slideUp .22s ease forwards; }
   .fade-in  { animation: fadeIn .15s ease forwards; }
   .spin     { animation: spin .8s linear infinite; }
@@ -179,7 +180,47 @@ function migrateTemplates(raw) {
   return wt;
 }
 
-// ── Primitive UI ──────────────────────────────────────────────────────────────
+// ── Current time helpers ──────────────────────────────────────────────────────
+// Returns "HH:MM" in 24h format for right now
+const nowHHMM = () => {
+  const n = new Date();
+  return `${String(n.getHours()).padStart(2,"0")}:${String(n.getMinutes()).padStart(2,"0")}`;
+};
+
+// Given an array of slots for today, find the one whose lesson is currently
+// ongoing. A slot owns the hour from its start time until the next slot starts.
+// Returns the slot object or null.
+function getCurrentSlot(slots) {
+  if (!slots || !slots.length) return null;
+  const now = nowHHMM();
+  // Get unique sorted times
+  const times = [...new Set(slots.map(s => s.time))].sort();
+  let activeTime = null;
+  for (let i = 0; i < times.length; i++) {
+    const start = times[i];
+    const end   = times[i + 1] || "23:59";
+    if (now >= start && now < end) { activeTime = start; break; }
+  }
+  if (!activeTime) return null;
+  // If dual day, prefer Room A for the banner (both are "current")
+  const matches = slots.filter(s => s.time === activeTime && s.className);
+  return matches[0] || null;
+}
+
+// Returns all slots at the current time (for dual days, both rooms)
+function getCurrentSlots(slots) {
+  if (!slots || !slots.length) return [];
+  const now = nowHHMM();
+  const times = [...new Set(slots.map(s => s.time))].sort();
+  let activeTime = null;
+  for (let i = 0; i < times.length; i++) {
+    const start = times[i];
+    const end   = times[i + 1] || "23:59";
+    if (now >= start && now < end) { activeTime = start; break; }
+  }
+  if (!activeTime) return [];
+  return slots.filter(s => s.time === activeTime && s.className);
+}
 const Btn = ({ children, onClick, variant = "primary", small, disabled, full, style: s = {} }) => {
   const variants = {
     primary: { bg: C.forest,     col: C.white,   bdr: "none" },
@@ -254,35 +295,45 @@ function SyncBadge({ status }) {
 // ── Student Mark ──────────────────────────────────────────────────────────────
 function StudentMark({ name, mark, onChange }) {
   const cfg = {
-    positive: { bg: C.greenBg,  col: C.green,  border: C.green },
-    negative: { bg: C.coralBg,  col: C.coral,  border: C.coral },
-    flag:     { bg: C.amberBg,  col: C.amber,  border: C.amber },
+    positive: { bg: C.greenBg,  col: C.green,  border: C.green  },
+    negative: { bg: C.coralBg,  col: C.coral,  border: C.coral  },
+    flag:     { bg: C.amberBg,  col: C.amber,  border: C.amber  },
+    absent:   { bg: "#F3F4F6",  col: "#6B7280", border: "#9CA3AF" },
     none:     { bg: "transparent", col: C.muted, border: C.border },
   };
   const toggle = (type) => onChange(mark === type ? "none" : type);
   const active = cfg[mark] || cfg.none;
+  const isAbsent = mark === "absent";
 
   return (
     <div style={{
       display: "flex", alignItems: "center", justifyContent: "space-between",
-      padding: "8px 12px", borderRadius: 9, background: C.bg,
+      padding: "8px 12px", borderRadius: 9,
+      background: isAbsent ? "#F9FAFB" : C.bg,
       border: `1.5px solid ${mark !== "none" ? active.border : C.border}`,
-      transition: "border-color .15s",
+      opacity: isAbsent ? .65 : 1,
+      transition: "border-color .15s, opacity .15s",
     }}>
-      <span style={{ fontSize: 14, fontWeight: 600, color: mark !== "none" ? active.col : C.text }}>
+      <span style={{
+        fontSize: 14, fontWeight: 600,
+        color: mark !== "none" ? active.col : C.text,
+        textDecoration: isAbsent ? "line-through" : "none",
+      }}>
         {name}
       </span>
       <div style={{ display: "flex", gap: 5 }}>
         {[
-          { type: "positive", icon: "✓", title: "Positive" },
-          { type: "negative", icon: "✗", title: "Concern" },
-          { type: "flag",     icon: "🚩", title: "Flag" },
+          { type: "positive", icon: "✓",  title: "Positive" },
+          { type: "negative", icon: "✗",  title: "Concern"  },
+          { type: "flag",     icon: "🚩", title: "Flag"     },
+          { type: "absent",   icon: "○",  title: "Absent"   },
         ].map(({ type, icon, title }) => {
           const isActive = mark === type;
           const mc = cfg[type];
           return (
             <button key={type} title={title} onClick={() => toggle(type)} style={{
-              width: 32, height: 32, borderRadius: 7, fontSize: 14, fontWeight: 700,
+              width: 32, height: 32, borderRadius: 7,
+              fontSize: type === "absent" ? 16 : 14, fontWeight: 700,
               border: `1.5px solid ${isActive ? mc.border : C.border}`,
               background: isActive ? mc.bg : C.surface,
               color: isActive ? mc.col : C.muted, cursor: "pointer", transition: "all .12s",
@@ -314,6 +365,7 @@ function ReportModal({ slot, existing, onSave, onClose }) {
     pos: slot.studentNames.filter(n => getMark(n) === "positive").length,
     neg: slot.studentNames.filter(n => getMark(n) === "negative").length,
     fl:  slot.studentNames.filter(n => getMark(n) === "flag").length,
+    abs: slot.studentNames.filter(n => getMark(n) === "absent").length,
   };
 
   const handleSave = async () => {
@@ -359,6 +411,7 @@ function ReportModal({ slot, existing, onSave, onClose }) {
                 {counts.pos > 0 && <span style={{ color:C.green, fontWeight:700 }}>✓ {counts.pos}</span>}
                 {counts.neg > 0 && <span style={{ color:C.coral, fontWeight:700 }}>✗ {counts.neg}</span>}
                 {counts.fl  > 0 && <span style={{ color:C.amber, fontWeight:700 }}>🚩 {counts.fl}</span>}
+                {counts.abs > 0 && <span style={{ color:C.muted, fontWeight:700 }}>○ {counts.abs} absent</span>}
               </div>
             </div>
             <p style={{ fontSize:12, color:C.muted, marginBottom:10 }}>Only mark students worth noting. Unmarked = fine.</p>
@@ -594,7 +647,7 @@ function TemplateBuilder({ weekTemplates, onSave, onClose }) {
 }
 
 // ── Slot Card ─────────────────────────────────────────────────────────────────
-function SlotCard({ slot, report, onLog, onEditTemplate }) {
+function SlotCard({ slot, report, onLog, onEditTemplate, isCurrent }) {
   const isEmpty   = !slot.className;
   const hasReport = !!report;
 
@@ -602,36 +655,44 @@ function SlotCard({ slot, report, onLog, onEditTemplate }) {
     pos: Object.values(report.marks || {}).filter(m => m === "positive").length,
     neg: Object.values(report.marks || {}).filter(m => m === "negative").length,
     fl:  Object.values(report.marks || {}).filter(m => m === "flag").length,
+    abs: Object.values(report.marks || {}).filter(m => m === "absent").length,
   } : null;
 
   return (
     <div style={{
       background: C.surface,
-      border:`1.5px solid ${hasReport ? C.green : isEmpty ? C.border : C.borderBright}`,
+      border:`1.5px solid ${isCurrent ? C.forest : hasReport ? C.green : isEmpty ? C.border : C.borderBright}`,
       borderRadius:12, overflow:"hidden",
-      borderLeft:`4px solid ${hasReport ? C.green : isEmpty ? C.border : C.amber}`,
-      boxShadow: hasReport ? "0 2px 8px rgba(13,122,71,.08)" : isEmpty ? "none" : "0 2px 8px rgba(0,0,0,.04)",
+      borderLeft:`4px solid ${isCurrent ? C.forest : hasReport ? C.green : isEmpty ? C.border : C.amber}`,
+      boxShadow: isCurrent ? "0 4px 16px rgba(30,58,47,.14)" : hasReport ? "0 2px 8px rgba(13,122,71,.08)" : isEmpty ? "none" : "0 2px 8px rgba(0,0,0,.04)",
     }}>
       <div style={{
         padding:"5px 12px", display:"flex", justifyContent:"space-between", alignItems:"center",
-        background: hasReport ? C.greenBg : isEmpty ? C.bg : C.amberBg,
-        borderBottom:`1px solid ${hasReport ? C.green+"33" : isEmpty ? C.border : C.amber+"33"}`,
+        background: isCurrent ? C.forest : hasReport ? C.greenBg : isEmpty ? C.bg : C.amberBg,
+        borderBottom:`1px solid ${isCurrent ? C.forestMid : hasReport ? C.green+"33" : isEmpty ? C.border : C.amber+"33"}`,
       }}>
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
           <span style={{ fontFamily:MONO, fontSize:11, letterSpacing:1.5, fontWeight:700,
-            color: hasReport ? C.green : isEmpty ? C.muted : C.amber }}>
+            color: isCurrent ? C.amberBg : hasReport ? C.green : isEmpty ? C.muted : C.amber }}>
             {slot.time}
           </span>
+          {isCurrent && (
+            <span style={{ fontFamily:MONO, fontSize:9, fontWeight:800, letterSpacing:1,
+              color:C.forest, background:C.amberBg, padding:"1px 7px", borderRadius:99 }}>
+              NOW
+            </span>
+          )}
           {slot.room && (
             <span style={{ fontFamily:MONO, fontSize:10, fontWeight:700, letterSpacing:.5,
-              color: slot.room === "Room A" ? C.purple : C.forest,
-              background: slot.room === "Room A" ? C.purpleBg : C.greenDim,
+              color: isCurrent ? C.amberBg : slot.room === "Room A" ? C.purple : C.forest,
+              background: isCurrent ? "rgba(255,255,255,.15)" : slot.room === "Room A" ? C.purpleBg : C.greenDim,
               padding:"1px 7px", borderRadius:99 }}>
               {slot.room}
             </span>
           )}
         </div>
-        {hasReport && <span style={{ fontSize:10, color:C.green, fontWeight:800, letterSpacing:.5 }}>✓ LOGGED</span>}
+        {hasReport && !isCurrent && <span style={{ fontSize:10, color:C.green, fontWeight:800, letterSpacing:.5 }}>✓ LOGGED</span>}
+        {hasReport && isCurrent && <span style={{ fontSize:10, color:C.amberBg, fontWeight:800, letterSpacing:.5 }}>✓ LOGGED</span>}
       </div>
 
       <div style={{ padding:"12px 14px" }}>
@@ -681,6 +742,7 @@ function SlotCard({ slot, report, onLog, onEditTemplate }) {
                 {counts.pos > 0 && <span style={{ color:C.green, fontWeight:700 }}>✓ {counts.pos}</span>}
                 {counts.neg > 0 && <span style={{ color:C.coral, fontWeight:700 }}>✗ {counts.neg}</span>}
                 {counts.fl  > 0 && <span style={{ color:C.amber, fontWeight:700 }}>🚩 {counts.fl}</span>}
+                {counts.abs > 0 && <span style={{ color:C.muted, fontWeight:700 }}>○ {counts.abs}</span>}
               </div>
             )}
 
@@ -746,8 +808,15 @@ function App() {
   const [date,          setDate]          = useState(todayStr());
   const [reportSlot,    setReportSlot]    = useState(null);
   const [showTemplate,  setShowTemplate]  = useState(false);
-  const [appStatus,     setAppStatus]     = useState("loading"); // loading | ready | error
-  const [syncStatus,    setSyncStatus]    = useState(null);      // saving | saved | error
+  const [appStatus,     setAppStatus]     = useState("loading");
+  const [syncStatus,    setSyncStatus]    = useState(null);
+  const [liveTime,      setLiveTime]      = useState(nowHHMM());
+
+  // Live clock — ticks every 30 seconds
+  useEffect(() => {
+    const t = setInterval(() => setLiveTime(nowHHMM()), 30000);
+    return () => clearInterval(t);
+  }, []);
 
   // ── Initial load ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -823,6 +892,8 @@ function App() {
 
   const dow   = dayName(date);
   const slots = (weekTemplates || buildWeekTemplates())[dow] || buildTemplate(dow);
+  const isToday = date === todayStr();
+  const currentSlots = isToday ? getCurrentSlots(slots) : [];
 
   return (
     <>
@@ -875,6 +946,95 @@ function App() {
           <DateNav date={date} onChange={setDate} />
         </div>
 
+        {/* ── CURRENT CLASS BANNER ── shows only today during active lesson hours */}
+        {currentSlots.length > 0 && (
+          <div style={{
+            marginBottom:20, borderRadius:12, overflow:"hidden",
+            border:`2px solid ${C.forest}`,
+            boxShadow:"0 4px 20px rgba(30,58,47,.12)",
+          }}>
+            <div style={{
+              background:C.forest, padding:"10px 18px",
+              display:"flex", justifyContent:"space-between", alignItems:"center",
+            }}>
+              <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                <div style={{
+                  width:8, height:8, borderRadius:"50%", background:C.green,
+                  boxShadow:`0 0 0 3px rgba(13,122,71,.3)`,
+                  animation:"pulse 2s ease infinite",
+                }} />
+                <span style={{ fontFamily:MONO, fontSize:11, color:C.amberBg, letterSpacing:2, fontWeight:700 }}>
+                  NOW LIVE
+                </span>
+              </div>
+              <span style={{ fontFamily:MONO, fontSize:13, color:C.amberBg, fontWeight:600 }}>
+                {liveTime}
+              </span>
+            </div>
+            <div style={{
+              background:"#F0F7F3", padding:"12px 18px",
+              display:"flex", gap:10, flexWrap:"wrap",
+            }}>
+              {currentSlots.map(slot => (
+                <button key={slot.id} onClick={() => setReportSlot(slot)} style={{
+                  flex:1, minWidth:180, padding:"10px 16px", borderRadius:9,
+                  background: dayReports[slot.id] ? C.greenBg : C.white,
+                  border:`1.5px solid ${dayReports[slot.id] ? C.green : C.forest}`,
+                  cursor:"pointer", textAlign:"left", transition:"all .15s",
+                }}
+                  onMouseEnter={e => e.currentTarget.style.background = dayReports[slot.id] ? C.greenBg : "#F8F6F1"}
+                  onMouseLeave={e => e.currentTarget.style.background = dayReports[slot.id] ? C.greenBg : C.white}
+                >
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+                    <span style={{ fontWeight:700, fontSize:14, color:C.forest }}>{slot.className}</span>
+                    {slot.room && (
+                      <span style={{ fontFamily:MONO, fontSize:10, fontWeight:700,
+                        color: slot.room === "Room A" ? C.purple : C.forestMid,
+                        background: slot.room === "Room A" ? C.purpleBg : C.greenDim,
+                        padding:"1px 7px", borderRadius:99 }}>
+                        {slot.room}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                    <span style={{ fontSize:12, color:C.textDim }}>
+                      {slot.studentNames.length} student{slot.studentNames.length !== 1 ? "s" : ""}
+                    </span>
+                    <span style={{ fontSize:12, fontWeight:700,
+                      color: dayReports[slot.id] ? C.green : C.forest }}>
+                      {dayReports[slot.id] ? "✓ Logged — tap to edit" : "Tap to log →"}
+                    </span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* No active class right now but is today */}
+        {isToday && currentSlots.length === 0 && slots.filter(s => s.className).length > 0 && (() => {
+          const times = [...new Set(slots.map(s => s.time))].sort();
+          const now = nowHHMM();
+          const next = times.find(t => t > now);
+          if (!next) return null;
+          const nextSlots = slots.filter(s => s.time === next && s.className);
+          if (!nextSlots.length) return null;
+          return (
+            <div style={{
+              marginBottom:20, borderRadius:10, padding:"10px 16px",
+              background:C.amberBg, border:`1.5px solid ${C.amber}`,
+              display:"flex", alignItems:"center", gap:10,
+            }}>
+              <span style={{ fontSize:13, color:C.amber, fontFamily:MONO, fontWeight:600 }}>
+                ⏱ Next class at {next}
+              </span>
+              <span style={{ fontSize:13, color:C.textDim }}>
+                — {nextSlots.map(s => s.className + (s.room ? ` (${s.room})` : "")).join(" · ")}
+              </span>
+            </div>
+          );
+        })()}
+
         {/* DAY LABEL */}
         <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:18 }}>
           <p style={{ fontFamily:MONO, fontSize:11, color:C.purple, letterSpacing:2, textTransform:"uppercase", fontWeight:600 }}>
@@ -896,11 +1056,13 @@ function App() {
             <div style={{ display:"grid", gap:14 }}>
               {times.map(time => {
                 const pair = slots.filter(s => s.time === time);
+                const isCurrent = isToday && currentSlots.some(s => s.time === time);
                 return (
                   <div key={time}>
                     <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
                       {pair.map(slot => (
                         <SlotCard key={slot.id} slot={slot} report={dayReports[slot.id]}
+                          isCurrent={isToday && currentSlots.some(s => s.id === slot.id)}
                           onLog={() => setReportSlot(slot)}
                           onEditTemplate={() => setShowTemplate(true)} />
                       ))}
@@ -914,6 +1076,7 @@ function App() {
           <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(270px, 1fr))", gap:14 }}>
             {slots.map(slot => (
               <SlotCard key={slot.id} slot={slot} report={dayReports[slot.id]}
+                isCurrent={isToday && currentSlots.some(s => s.id === slot.id)}
                 onLog={() => setReportSlot(slot)}
                 onEditTemplate={() => setShowTemplate(true)} />
             ))}
