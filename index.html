@@ -844,9 +844,14 @@ function buildStudentProfiles(records) {
   const profiles = {};
   records.forEach(rec => {
     const marks = rec.report?.marks || {};
+    const note  = rec.report?.note  || "";
+
     rec.studentNames.forEach(name => {
       if (!profiles[name]) {
-        profiles[name] = { name, classes: 0, positive: 0, negative: 0, flag: 0, absent: 0, classNames: new Set() };
+        profiles[name] = {
+          name, classes: 0, positive: 0, negative: 0, flag: 0, absent: 0,
+          classNames: new Set(), mentions: [],
+        };
       }
       const p = profiles[name];
       p.classes++;
@@ -856,6 +861,16 @@ function buildStudentProfiles(records) {
       else if (m === "negative") p.negative++;
       else if (m === "flag") p.flag++;
       else if (m === "absent") p.absent++;
+
+      // Collect teacher notes that mention this student's name (case-insensitive)
+      if (note && note.toLowerCase().includes(name.toLowerCase())) {
+        p.mentions.push({
+          note,
+          date:      rec.date,
+          className: rec.className,
+          mark:      m,
+        });
+      }
     });
   });
   return Object.values(profiles).sort((a, b) => a.name.localeCompare(b.name));
@@ -969,14 +984,21 @@ function MetricPie({ title, data }) {
   );
 }
 
-function StudentProfileCard({ profile }) {
+// ── Student Profile Card (clickable summary) ──────────────────────────────────
+function StudentProfileCard({ profile, onClick }) {
   const attended = profile.classes - profile.absent;
   const attPct   = profile.classes > 0 ? Math.round(attended / profile.classes * 100) : 0;
   const posPct   = attended > 0 ? Math.round(profile.positive / attended * 100) : 0;
   const barColor = posPct >= 60 ? C.green : posPct >= 30 ? C.amber : C.coral;
 
   return (
-    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "14px 16px" }}>
+    <div onClick={onClick} style={{
+      background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10,
+      padding: "14px 16px", cursor: "pointer", transition: "all .15s",
+    }}
+      onMouseEnter={e => { e.currentTarget.style.borderColor = C.forest; e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 4px 14px rgba(0,0,0,.08)"; }}
+      onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}
+    >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
         <div>
           <p style={{ fontWeight: 700, fontSize: 15, color: C.forest }}>{profile.name}</p>
@@ -993,11 +1015,10 @@ function StudentProfileCard({ profile }) {
           <span style={{ fontSize: 11, fontWeight: 700, color: barColor, fontFamily: MONO }}>{posPct}%</span>
         </div>
         <div style={{ height: 6, background: C.border, borderRadius: 99, overflow: "hidden" }}>
-          <div style={{ height: "100%", width: `${posPct}%`, background: barColor,
-            borderRadius: 99, transition: "width .4s ease" }} />
+          <div style={{ height: "100%", width: `${posPct}%`, background: barColor, borderRadius: 99, transition: "width .4s ease" }} />
         </div>
       </div>
-      <div style={{ display: "flex", gap: 8, fontSize: 11 }}>
+      <div style={{ display: "flex", gap: 8, fontSize: 11, alignItems: "center" }}>
         {[
           { icon: "✓",  val: profile.positive, col: C.green },
           { icon: "✗",  val: profile.negative, col: C.coral },
@@ -1007,6 +1028,211 @@ function StudentProfileCard({ profile }) {
           <span key={icon} style={{ color: col, fontWeight: 700, fontFamily: MONO }}>{icon} {val}</span>
         ))}
         <span style={{ color: C.muted, marginLeft: "auto" }}>{profile.classes} logged</span>
+        {profile.mentions.length > 0 && (
+          <span style={{ fontSize: 10, color: C.purple, fontWeight: 700 }}>💬 {profile.mentions.length}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Student Detail View (full profile page) ───────────────────────────────────
+function StudentDetailView({ profile, allRecords, onBack }) {
+  const attended = profile.classes - profile.absent;
+  const attPct   = profile.classes > 0 ? Math.round(attended / profile.classes * 100) : 0;
+  const posPct   = attended > 0 ? Math.round(profile.positive / attended * 100) : 0;
+  const negPct   = attended > 0 ? Math.round(profile.negative / attended * 100) : 0;
+  const neuPct   = attended > 0 ? Math.round((attended - profile.positive - profile.negative - profile.flag) / attended * 100) : 0;
+  const barColor = posPct >= 60 ? C.green : posPct >= 30 ? C.amber : C.coral;
+
+  // Mark distribution pie
+  const markData = [
+    { label: "Positive", value: profile.positive, color: C.green  },
+    { label: "Neutral",  value: attended - profile.positive - profile.negative - profile.flag, color: "#CBD5E1" },
+    { label: "Concern",  value: profile.negative, color: C.coral  },
+    { label: "Flag",     value: profile.flag,     color: C.amber  },
+  ];
+
+  // Per-class breakdown for this student
+  const classStats = [...profile.classNames].map(cn => {
+    const recs = allRecords.filter(r => r.className === cn && r.studentNames.includes(profile.name));
+    const pos = recs.filter(r => (r.report?.marks?.[profile.name] || "none") === "positive").length;
+    const neg = recs.filter(r => (r.report?.marks?.[profile.name] || "none") === "negative").length;
+    const fl  = recs.filter(r => (r.report?.marks?.[profile.name] || "none") === "flag").length;
+    const abs = recs.filter(r => (r.report?.marks?.[profile.name] || "none") === "absent").length;
+    const att = recs.length - abs;
+    return { cn, total: recs.length, pos, neg, fl, abs, att };
+  });
+
+  // Chronological log entries for this student
+  const log = allRecords
+    .filter(r => r.studentNames.includes(profile.name))
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .map(r => ({
+      date:      r.date,
+      className: r.className,
+      mark:      r.report?.marks?.[profile.name] || "none",
+      note:      r.report?.note || "",
+      mood:      r.report?.mood || "",
+      engagement:r.report?.engagement || "",
+    }));
+
+  const fmtDateShort = (d) => new Date(d + "T12:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+
+  const markIcon = { positive:"✓", negative:"✗", flag:"🚩", absent:"○", none:"—" };
+  const markCol  = { positive: C.green, negative: C.coral, flag: C.amber, absent: C.muted, none: C.border };
+  const markBg   = { positive: C.greenBg, negative: C.coralBg, flag: C.amberBg, absent: "#F3F4F6", none: C.bg };
+
+  return (
+    <div className="fade-in">
+      {/* Back button */}
+      <button onClick={onBack} style={{
+        background: "none", border: "none", cursor: "pointer", color: C.muted,
+        fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 6, marginBottom: 20,
+      }}>← All Students</button>
+
+      {/* Header */}
+      <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "20px 22px", marginBottom: 20 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+          <div>
+            <h2 style={{ fontFamily: SERIF, fontSize: 26, color: C.forest }}>{profile.name}</h2>
+            <p style={{ fontSize: 13, color: C.muted, marginTop: 4 }}>{[...profile.classNames].join(" · ")}</p>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, textAlign: "center" }}>
+            <div style={{ background: C.bg, borderRadius: 9, padding: "10px 16px" }}>
+              <p style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: C.forest }}>{attPct}%</p>
+              <p style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>Attendance</p>
+            </div>
+            <div style={{ background: C.bg, borderRadius: 9, padding: "10px 16px" }}>
+              <p style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: barColor }}>{posPct}%</p>
+              <p style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>Positive rate</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Progress bar */}
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ height: 8, background: C.border, borderRadius: 99, overflow: "hidden", display: "flex" }}>
+            <div style={{ width: `${posPct}%`, background: C.green, transition: "width .4s" }} />
+            <div style={{ width: `${neuPct}%`, background: "#CBD5E1" }} />
+            <div style={{ width: `${negPct}%`, background: C.coral }} />
+          </div>
+          <div style={{ display: "flex", gap: 16, marginTop: 6, fontSize: 11 }}>
+            <span style={{ color: C.green }}>✓ {profile.positive} positive</span>
+            <span style={{ color: C.muted }}>{attended - profile.positive - profile.negative - profile.flag} neutral</span>
+            <span style={{ color: C.coral }}>✗ {profile.negative} concern</span>
+            <span style={{ color: C.amber }}>🚩 {profile.flag} flag</span>
+            <span style={{ color: C.muted }}>○ {profile.absent} absent</span>
+            <span style={{ color: C.muted, marginLeft: "auto" }}>{profile.classes} total logged</span>
+          </div>
+        </div>
+
+        {/* Mark distribution pie */}
+        {attended > 0 && (
+          <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+            <PieChart data={markData} size={90} />
+            <div style={{ display: "grid", gap: 5 }}>
+              {markData.filter(d => d.value > 0).map(d => (
+                <div key={d.label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ width: 9, height: 9, borderRadius: 2, background: d.color, flexShrink: 0 }} />
+                  <span style={{ fontSize: 12, color: C.textDim, minWidth: 56 }}>{d.label}</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: C.text, fontFamily: MONO }}>{d.value}</span>
+                  <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO }}>
+                    {Math.round(d.value / attended * 100)}%
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Per-class breakdown */}
+      {classStats.length > 1 && (
+        <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18, marginBottom: 20 }}>
+          <p style={{ fontFamily: MONO, fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: 1, fontWeight: 700, marginBottom: 14 }}>By Class</p>
+          <div style={{ display: "grid", gap: 8 }}>
+            {classStats.map(cs => {
+              const p = cs.att > 0 ? Math.round(cs.pos / cs.att * 100) : 0;
+              return (
+                <div key={cs.cn} style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 12px", background: C.bg, borderRadius: 8 }}>
+                  <span style={{ fontWeight: 600, fontSize: 13, color: C.forest, flex: 1 }}>{cs.cn}</span>
+                  <div style={{ display: "flex", gap: 10, fontSize: 11 }}>
+                    <span style={{ color: C.green, fontWeight: 700 }}>✓ {cs.pos}</span>
+                    <span style={{ color: C.coral, fontWeight: 700 }}>✗ {cs.neg}</span>
+                    {cs.fl  > 0 && <span style={{ color: C.amber, fontWeight: 700 }}>🚩 {cs.fl}</span>}
+                    {cs.abs > 0 && <span style={{ color: C.muted, fontWeight: 700 }}>○ {cs.abs}</span>}
+                  </div>
+                  <div style={{ width: 60, height: 5, background: C.border, borderRadius: 99, overflow: "hidden" }}>
+                    <div style={{ width: `${p}%`, height: "100%", background: p >= 60 ? C.green : p >= 30 ? C.amber : C.coral }} />
+                  </div>
+                  <span style={{ fontFamily: MONO, fontSize: 11, color: C.textDim, minWidth: 30, textAlign: "right" }}>{p}%</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Teacher notes mentioning this student */}
+      {profile.mentions.length > 0 && (
+        <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18, marginBottom: 20 }}>
+          <p style={{ fontFamily: MONO, fontSize: 11, color: C.purple, textTransform: "uppercase", letterSpacing: 1, fontWeight: 700, marginBottom: 14 }}>
+            💬 Teacher Notes Mentioning {profile.name}
+          </p>
+          <div style={{ display: "grid", gap: 10 }}>
+            {profile.mentions.map((m, i) => (
+              <div key={i} style={{ padding: "10px 14px", background: C.purpleBg, borderRadius: 9, borderLeft: `3px solid ${C.purple}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: C.purple }}>{m.className}</span>
+                  <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO }}>{fmtDateShort(m.date)}</span>
+                </div>
+                <p style={{ fontSize: 13, color: C.text, lineHeight: 1.6 }}>{m.note}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Full chronological log */}
+      <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
+        <p style={{ fontFamily: MONO, fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: 1, fontWeight: 700, marginBottom: 14 }}>
+          Lesson History ({log.length})
+        </p>
+        {log.length === 0 ? (
+          <p style={{ fontSize: 13, color: C.muted }}>No lessons logged yet.</p>
+        ) : (
+          <div style={{ display: "grid", gap: 8 }}>
+            {log.map((entry, i) => (
+              <div key={i} style={{
+                display: "flex", alignItems: "flex-start", gap: 10, padding: "9px 12px",
+                background: markBg[entry.mark] || C.bg, borderRadius: 8,
+                border: `1px solid ${(markCol[entry.mark] || C.border)}22`,
+              }}>
+                <div style={{
+                  width: 28, height: 28, borderRadius: 7, flexShrink: 0,
+                  background: markCol[entry.mark] || C.border,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 13, fontWeight: 700, color: C.white,
+                }}>{markIcon[entry.mark] || "—"}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: entry.note ? 4 : 0 }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: C.forest }}>{entry.className}</span>
+                    <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO, flexShrink: 0, marginLeft: 8 }}>{fmtDateShort(entry.date)}</span>
+                  </div>
+                  {entry.note && (
+                    <p style={{ fontSize: 12, color: C.textDim, lineHeight: 1.5, fontStyle: "italic" }}>"{entry.note}"</p>
+                  )}
+                  {(entry.mood || entry.engagement) && (
+                    <p style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>
+                      {entry.mood.split(" ")[0]} {entry.engagement.split(" ")[0]}
+                    </p>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1022,6 +1248,7 @@ function AnalyticsView({ weekTemplates, onClose }) {
   const [filterClass, setFilterClass] = useState("All");
   const [activeTab,   setActiveTab]   = useState("overview");
   const [searchName,  setSearchName]  = useState("");
+  const [selectedStudent, setSelectedStudent] = useState(null);
 
   const range = rangeMode === "week" ? isoWeekRange(rangeOffset) : monthRange(rangeOffset);
 
@@ -1071,7 +1298,7 @@ function AnalyticsView({ weekTemplates, onClose }) {
     : students;
 
   const Tab = ({ id, label }) => (
-    <button onClick={() => setActiveTab(id)} style={{
+    <button onClick={() => { setActiveTab(id); setSelectedStudent(null); }} style={{
       padding: "7px 16px", borderRadius: 8, border: "none",
       background: activeTab === id ? C.forest : "transparent",
       color: activeTab === id ? C.white : C.textDim,
@@ -1213,19 +1440,31 @@ function AnalyticsView({ weekTemplates, onClose }) {
 
             {activeTab === "students" && (
               <div>
-                <div style={{ marginBottom: 16 }}>
-                  <input value={searchName} onChange={e => setSearchName(e.target.value)}
-                    placeholder="Search student name…"
-                    style={{ width: "100%", maxWidth: 300, background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", fontSize: 14, color: C.text, outline: "none" }}
-                    onFocus={e => e.target.style.borderColor = C.forest}
-                    onBlur={e => e.target.style.borderColor = C.border} />
-                  <span style={{ fontSize: 12, color: C.muted, marginLeft: 12 }}>
-                    {filteredStudents.length} student{filteredStudents.length !== 1 ? "s" : ""}
-                  </span>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
-                  {filteredStudents.map(p => <StudentProfileCard key={p.name} profile={p} />)}
-                </div>
+                {selectedStudent ? (
+                  <StudentDetailView
+                    profile={selectedStudent}
+                    allRecords={filtered}
+                    onBack={() => setSelectedStudent(null)}
+                  />
+                ) : (
+                  <>
+                    <div style={{ marginBottom: 16 }}>
+                      <input value={searchName} onChange={e => setSearchName(e.target.value)}
+                        placeholder="Search student name…"
+                        style={{ width: "100%", maxWidth: 300, background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", fontSize: 14, color: C.text, outline: "none" }}
+                        onFocus={e => e.target.style.borderColor = C.forest}
+                        onBlur={e => e.target.style.borderColor = C.border} />
+                      <span style={{ fontSize: 12, color: C.muted, marginLeft: 12 }}>
+                        {filteredStudents.length} student{filteredStudents.length !== 1 ? "s" : ""} · click any card to view full profile
+                      </span>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
+                      {filteredStudents.map(p => (
+                        <StudentProfileCard key={p.name} profile={p} onClick={() => setSelectedStudent(p)} />
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
             )}
           </>
