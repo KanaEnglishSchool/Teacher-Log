@@ -71,6 +71,23 @@ async function saveReport(date, slotId, report) {
   await sbUpsert("reports", { id, data: report, saved_at: new Date().toISOString() });
 }
 
+// ── Student records (test scores + Eiken) ─────────────────────────────────────
+async function loadStudentRecord(studentName) {
+  try {
+    const rows = await sbGet("student_records", `?id=eq.${encodeURIComponent(studentName)}`);
+    if (rows && rows.length > 0) return rows[0].data;
+  } catch {}
+  return { testScores: [], eikenHistory: [] };
+}
+
+async function saveStudentRecord(studentName, data) {
+  await sbUpsert("student_records", {
+    id: studentName,
+    data,
+    updated_at: new Date().toISOString(),
+  });
+}
+
 async function loadReportsInRange(fromDate, toDate) {
   const rows = await sbGet("reports", `?id=gte.${fromDate}&id=lte.${toDate}_zzz&order=id.asc`);
   return rows || [];
@@ -1084,6 +1101,442 @@ function StudentProfileCard({ profile, onClick }) {
   );
 }
 
+// ── Eiken data ────────────────────────────────────────────────────────────────
+const EIKEN_LEVELS = ["5級","4級","3級","準2級","2級","準1級","1級"];
+const EIKEN_GRADE_EN = { "5級":"Grade 5","4級":"Grade 4","3級":"Grade 3","準2級":"Pre-Grade 2","2級":"Grade 2","準1級":"Pre-Grade 1","1級":"Grade 1" };
+
+// Eiken score criteria per level (Primary + Secondary where applicable)
+// Source: Eiken official passing criteria
+const EIKEN_CRITERIA = {
+  "5級":  { primary: { total: 550, pass: 419, sections: [{ name:"Vocab/Grammar", max:275 },{ name:"Reading", max:275 }] }, secondary: null },
+  "4級":  { primary: { total: 700, pass: 480, sections: [{ name:"Vocab/Grammar", max:350 },{ name:"Reading", max:350 }] }, secondary: null },
+  "3級":  { primary: { total: 1950, pass: 1103, sections: [{ name:"Vocabulary", max:650 },{ name:"Reading", max:650 },{ name:"Listening", max:650 }] }, secondary: { total: 1950, pass: 1103, sections: [{ name:"Writing", max:650 },{ name:"Speaking", max:1300 }] } },
+  "準2級": { primary: { total: 1950, pass: 1322, sections: [{ name:"Vocabulary", max:650 },{ name:"Reading", max:650 },{ name:"Listening", max:650 }] }, secondary: { total: 1950, pass: 1322, sections: [{ name:"Writing", max:650 },{ name:"Speaking", max:1300 }] } },
+  "2級":  { primary: { total: 2150, pass: 1520, sections: [{ name:"Vocabulary", max:650 },{ name:"Reading", max:700 },{ name:"Listening", max:800 }] }, secondary: { total: 2150, pass: 1520, sections: [{ name:"Writing", max:850 },{ name:"Speaking", max:1300 }] } },
+  "準1級": { primary: { total: 2250, pass: 1792, sections: [{ name:"Vocabulary", max:750 },{ name:"Reading", max:750 },{ name:"Listening", max:750 }] }, secondary: { total: 2250, pass: 1792, sections: [{ name:"Writing", max:750 },{ name:"Speaking", max:1500 }] } },
+  "1級":  { primary: { total: 2550, pass: 2028, sections: [{ name:"Vocabulary", max:850 },{ name:"Reading", max:850 },{ name:"Listening", max:850 }] }, secondary: { total: 2550, pass: 2028, sections: [{ name:"Writing", max:850 },{ name:"Speaking", max:1700 }] } },
+};
+
+const SCHOOL_TERMS = ["Term 1","Term 2","Term 3","Term 4"];
+const CURRENT_YEAR = new Date().getFullYear();
+const YEARS = Array.from({ length: 6 }, (_, i) => String(CURRENT_YEAR - i));
+const EIKEN_SESSIONS = ["第1回 (June)","第2回 (October)","第3回 (January)"];
+
+// ── SVG Line Chart ────────────────────────────────────────────────────────────
+function LineChart({ points, maxY = 100, minY = 0, width = 400, height = 160, passLine }) {
+  if (!points || points.length === 0) return (
+    <div style={{ height, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <span style={{ fontSize: 12, color: C.muted }}>No data yet</span>
+    </div>
+  );
+
+  const pad = { top: 16, right: 20, bottom: 36, left: 44 };
+  const W = width  - pad.left - pad.right;
+  const H = height - pad.top  - pad.bottom;
+  const range = maxY - minY || 1;
+
+  const toX = (i) => points.length === 1 ? W / 2 : (i / (points.length - 1)) * W;
+  const toY = (v) => H - ((v - minY) / range) * H;
+
+  const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"} ${toX(i).toFixed(1)} ${toY(p.score).toFixed(1)}`).join(" ");
+
+  // Y axis ticks
+  const ticks = 4;
+  const tickVals = Array.from({ length: ticks + 1 }, (_, i) => minY + Math.round((range / ticks) * i));
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} width="100%" style={{ overflow: "visible", maxWidth: width }}>
+      <g transform={`translate(${pad.left},${pad.top})`}>
+        {/* Grid lines */}
+        {tickVals.map(v => (
+          <line key={v} x1={0} y1={toY(v)} x2={W} y2={toY(v)}
+            stroke={C.border} strokeWidth="1" strokeDasharray="4 3" />
+        ))}
+        {/* Pass line */}
+        {passLine !== undefined && (
+          <>
+            <line x1={0} y1={toY(passLine)} x2={W} y2={toY(passLine)}
+              stroke={C.green} strokeWidth="1.5" strokeDasharray="6 3" opacity=".7" />
+            <text x={W + 4} y={toY(passLine) + 4} fontSize="9" fill={C.green} fontFamily="monospace">Pass</text>
+          </>
+        )}
+        {/* Y axis labels */}
+        {tickVals.map(v => (
+          <text key={v} x={-6} y={toY(v) + 4} fontSize="9" fill={C.muted}
+            textAnchor="end" fontFamily="monospace">{v}</text>
+        ))}
+        {/* X axis labels */}
+        {points.map((p, i) => (
+          <text key={i} x={toX(i)} y={H + 18} fontSize="9" fill={C.muted}
+            textAnchor="middle" fontFamily="monospace">{p.label}</text>
+        ))}
+        {/* Line */}
+        <path d={pathD} fill="none" stroke={C.forest} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+        {/* Dots */}
+        {points.map((p, i) => (
+          <g key={i}>
+            <circle cx={toX(i)} cy={toY(p.score)} r={5} fill={C.surface} stroke={C.forest} strokeWidth="2.5" />
+            <text x={toX(i)} y={toY(p.score) - 9} fontSize="9" fill={C.forest}
+              textAnchor="middle" fontWeight="700" fontFamily="monospace">{p.score}</text>
+          </g>
+        ))}
+      </g>
+    </svg>
+  );
+}
+
+// ── Test Scores Section ───────────────────────────────────────────────────────
+function TestScoresSection({ studentName, initialData, onSave }) {
+  const [scores, setScores]       = useState(initialData?.testScores || []);
+  const [adding, setAdding]       = useState(false);
+  const [saving, setSaving]       = useState(false);
+  // Form state
+  const [year,   setYear]   = useState(String(CURRENT_YEAR));
+  const [term,   setTerm]   = useState(SCHOOL_TERMS[0]);
+  const [score,  setScore]  = useState("");
+  const [maxScore, setMaxScore] = useState("100");
+  const [notes,  setNotes]  = useState("");
+
+  const addScore = async () => {
+    if (!score) return;
+    const newEntry = { id: Date.now(), year, term, score: Number(score), maxScore: Number(maxScore), notes, date: todayStr() };
+    const updated = [...scores, newEntry].sort((a, b) =>
+      `${a.year}${SCHOOL_TERMS.indexOf(a.term)}`.localeCompare(`${b.year}${SCHOOL_TERMS.indexOf(b.term)}`)
+    );
+    setSaving(true);
+    await onSave({ testScores: updated });
+    setScores(updated);
+    setSaving(false);
+    setAdding(false);
+    setScore(""); setNotes("");
+  };
+
+  const removeScore = async (id) => {
+    const updated = scores.filter(s => s.id !== id);
+    await onSave({ testScores: updated });
+    setScores(updated);
+  };
+
+  // Build chart points — score as percentage of maxScore
+  const chartPoints = scores.map(s => ({
+    label: `${s.year.slice(2)}\n${s.term.replace("Term ","")}`,
+    score: s.maxScore ? Math.round(s.score / s.maxScore * 100) : s.score,
+    raw:   s.score,
+  }));
+
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18, marginBottom: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <p style={{ fontFamily: MONO, fontSize: 11, color: C.blue, textTransform: "uppercase", letterSpacing: 1, fontWeight: 700 }}>
+          📝 School Test Scores
+        </p>
+        <Btn variant="ghost" small onClick={() => setAdding(!adding)}>
+          {adding ? "Cancel" : "+ Add Score"}
+        </Btn>
+      </div>
+
+      {/* Add form */}
+      {adding && (
+        <div style={{ background: C.bg, borderRadius: 10, padding: 14, marginBottom: 16, display: "grid", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <div>
+              <FieldLabel>Year</FieldLabel>
+              <select value={year} onChange={e => setYear(e.target.value)} style={{ width:"100%", background:C.surface, border:`1.5px solid ${C.border}`, borderRadius:8, padding:"8px 10px", fontSize:13, color:C.text, outline:"none" }}>
+                {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+              </select>
+            </div>
+            <div>
+              <FieldLabel>Term</FieldLabel>
+              <select value={term} onChange={e => setTerm(e.target.value)} style={{ width:"100%", background:C.surface, border:`1.5px solid ${C.border}`, borderRadius:8, padding:"8px 10px", fontSize:13, color:C.text, outline:"none" }}>
+                {SCHOOL_TERMS.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <LightInput label="Score" value={score} onChange={setScore} placeholder="e.g. 78" />
+            <LightInput label="Out of" value={maxScore} onChange={setMaxScore} placeholder="e.g. 100" />
+          </div>
+          <LightInput label="Notes (optional)" value={notes} onChange={setNotes} placeholder="e.g. Strong on listening, weak grammar" />
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Btn variant="primary" small onClick={addScore} disabled={saving || !score}>
+              {saving ? "Saving…" : "Save Score"}
+            </Btn>
+          </div>
+        </div>
+      )}
+
+      {scores.length === 0 ? (
+        <p style={{ fontSize: 13, color: C.muted, textAlign: "center", padding: "20px 0" }}>No test scores recorded yet.</p>
+      ) : (
+        <>
+          {/* Line chart */}
+          <div style={{ marginBottom: 16, overflowX: "auto" }}>
+            <LineChart
+              points={chartPoints}
+              minY={0} maxY={100}
+              width={Math.max(300, chartPoints.length * 80)}
+              height={160}
+            />
+            <p style={{ fontSize: 10, color: C.muted, textAlign: "center", marginTop: 4 }}>Scores shown as % of total</p>
+          </div>
+
+          {/* Score table */}
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ borderBottom: `2px solid ${C.border}` }}>
+                  {["Year","Term","Score","/ Max","%","Notes",""].map(h => (
+                    <th key={h} style={{ padding: "6px 10px", textAlign: "left", fontFamily: MONO, fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: .5, fontWeight: 700 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {scores.map((s, i) => {
+                  const pct = s.maxScore ? Math.round(s.score / s.maxScore * 100) : null;
+                  const col = pct !== null ? (pct >= 80 ? C.green : pct >= 60 ? C.amber : C.coral) : C.muted;
+                  return (
+                    <tr key={s.id} style={{ borderBottom: `1px solid ${C.border}`, background: i % 2 === 0 ? C.bg : C.surface }}>
+                      <td style={{ padding: "8px 10px", fontFamily: MONO, fontWeight: 700 }}>{s.year}</td>
+                      <td style={{ padding: "8px 10px" }}>{s.term}</td>
+                      <td style={{ padding: "8px 10px", fontFamily: MONO, fontWeight: 700, color: C.forest }}>{s.score}</td>
+                      <td style={{ padding: "8px 10px", color: C.muted }}>{s.maxScore}</td>
+                      <td style={{ padding: "8px 10px", fontFamily: MONO, fontWeight: 700, color: col }}>{pct !== null ? `${pct}%` : "—"}</td>
+                      <td style={{ padding: "8px 10px", color: C.textDim, fontSize: 12 }}>{s.notes || "—"}</td>
+                      <td style={{ padding: "8px 10px" }}>
+                        <button onClick={() => removeScore(s.id)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 14, padding: 2 }} title="Remove">×</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Eiken History Section ─────────────────────────────────────────────────────
+function EikenSection({ studentName, initialData, onSave }) {
+  const [history,  setHistory]  = useState(initialData?.eikenHistory || []);
+  const [adding,   setAdding]   = useState(false);
+  const [saving,   setSaving]   = useState(false);
+  // Form
+  const [level,    setLevel]    = useState(EIKEN_LEVELS[2]);
+  const [year,     setYear]     = useState(String(CURRENT_YEAR));
+  const [session,  setSession]  = useState(EIKEN_SESSIONS[0]);
+  const [stage,    setStage]    = useState("Primary"); // Primary | Secondary
+  const [result,   setResult]   = useState("Pass");
+  const [sectionScores, setSectionScores] = useState({});
+
+  const criteria     = EIKEN_CRITERIA[level];
+  const stageData    = stage === "Primary" ? criteria?.primary : criteria?.secondary;
+  const hasSecondary = !!criteria?.secondary;
+
+  const updateSectionScore = (name, val) => setSectionScores(prev => ({ ...prev, [name]: val }));
+
+  const totalEntered = stageData?.sections.reduce((s, sec) => s + (Number(sectionScores[sec.name]) || 0), 0) || 0;
+  const passScore    = stageData?.pass || 0;
+  const autoResult   = stageData ? (totalEntered >= passScore ? "Pass" : "Fail") : result;
+
+  const addEntry = async () => {
+    const sections = stageData?.sections.map(sec => ({
+      name:  sec.name,
+      score: Number(sectionScores[sec.name]) || 0,
+      max:   sec.max,
+    })) || [];
+    const totalScore = sections.reduce((s, x) => s + x.score, 0);
+    const newEntry = {
+      id: Date.now(), level, year, session, stage,
+      result: stageData ? autoResult : result,
+      totalScore, passScore: stageData?.pass || 0,
+      sections, date: todayStr(),
+    };
+    const updated = [...history, newEntry].sort((a, b) => {
+      const aKey = `${a.year}${EIKEN_SESSIONS.indexOf(a.session)}`;
+      const bKey = `${b.year}${EIKEN_SESSIONS.indexOf(b.session)}`;
+      return bKey.localeCompare(aKey);
+    });
+    setSaving(true);
+    await onSave({ eikenHistory: updated });
+    setHistory(updated);
+    setSaving(false);
+    setAdding(false);
+    setSectionScores({});
+  };
+
+  const removeEntry = async (id) => {
+    const updated = history.filter(e => e.id !== id);
+    await onSave({ eikenHistory: updated });
+    setHistory(updated);
+  };
+
+  // Latest level
+  const latestPass = history.filter(e => e.result === "Pass").sort((a, b) => {
+    return EIKEN_LEVELS.indexOf(b.level) - EIKEN_LEVELS.indexOf(a.level);
+  })[0];
+
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18, marginBottom: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+        <div>
+          <p style={{ fontFamily: MONO, fontSize: 11, color: C.amber, textTransform: "uppercase", letterSpacing: 1, fontWeight: 700 }}>
+            🏆 Eiken History
+          </p>
+          {latestPass && (
+            <p style={{ fontSize: 13, color: C.textDim, marginTop: 4 }}>
+              Current level: <strong style={{ color: C.forest }}>{latestPass.level} ({EIKEN_GRADE_EN[latestPass.level]})</strong>
+            </p>
+          )}
+        </div>
+        <Btn variant="ghost" small onClick={() => setAdding(!adding)}>
+          {adding ? "Cancel" : "+ Add Eiken"}
+        </Btn>
+      </div>
+
+      {/* Add form */}
+      {adding && (
+        <div style={{ background: C.bg, borderRadius: 10, padding: 14, marginBottom: 16, display: "grid", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+            <div>
+              <FieldLabel>Level</FieldLabel>
+              <select value={level} onChange={e => { setLevel(e.target.value); setSectionScores({}); }} style={{ width:"100%", background:C.surface, border:`1.5px solid ${C.border}`, borderRadius:8, padding:"8px 10px", fontSize:13, color:C.text, outline:"none" }}>
+                {EIKEN_LEVELS.map(l => <option key={l} value={l}>{l} — {EIKEN_GRADE_EN[l]}</option>)}
+              </select>
+            </div>
+            <div>
+              <FieldLabel>Year</FieldLabel>
+              <select value={year} onChange={e => setYear(e.target.value)} style={{ width:"100%", background:C.surface, border:`1.5px solid ${C.border}`, borderRadius:8, padding:"8px 10px", fontSize:13, color:C.text, outline:"none" }}>
+                {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+              </select>
+            </div>
+            <div>
+              <FieldLabel>Session</FieldLabel>
+              <select value={session} onChange={e => setSession(e.target.value)} style={{ width:"100%", background:C.surface, border:`1.5px solid ${C.border}`, borderRadius:8, padding:"8px 10px", fontSize:13, color:C.text, outline:"none" }}>
+                {EIKEN_SESSIONS.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+          </div>
+
+          {hasSecondary && (
+            <div>
+              <FieldLabel>Stage</FieldLabel>
+              <div style={{ display: "flex", gap: 8 }}>
+                {["Primary","Secondary"].map(s => (
+                  <button key={s} onClick={() => { setStage(s); setSectionScores({}); }} style={{
+                    padding: "6px 16px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer",
+                    border: `1.5px solid ${stage === s ? C.forest : C.border}`,
+                    background: stage === s ? C.forest : "transparent",
+                    color: stage === s ? C.white : C.muted,
+                  }}>{s}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Section scores */}
+          {stageData && (
+            <div>
+              <FieldLabel>Section Scores</FieldLabel>
+              <div style={{ display: "grid", gap: 8 }}>
+                {stageData.sections.map(sec => (
+                  <div key={sec.name} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontSize: 13, color: C.textDim, flex: 1 }}>{sec.name}</span>
+                    <input
+                      type="number" min="0" max={sec.max}
+                      value={sectionScores[sec.name] || ""}
+                      onChange={e => updateSectionScore(sec.name, e.target.value)}
+                      placeholder="0"
+                      style={{ width: 80, background:C.surface, border:`1.5px solid ${C.border}`, borderRadius:7, padding:"6px 10px", fontSize:13, color:C.text, outline:"none", textAlign:"right" }}
+                    />
+                    <span style={{ fontSize: 11, color: C.muted, minWidth: 52 }}>/ {sec.max}</span>
+                  </div>
+                ))}
+                {/* Total vs pass */}
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: C.surface, borderRadius: 8, marginTop: 4 }}>
+                  <span style={{ fontWeight: 700, fontSize: 13, flex: 1 }}>Total</span>
+                  <span style={{ fontFamily: MONO, fontWeight: 700, fontSize: 15, color: totalEntered >= passScore ? C.green : C.coral }}>
+                    {totalEntered}
+                  </span>
+                  <span style={{ fontSize: 11, color: C.muted }}>/ {stageData.total} &nbsp;(Pass: {passScore})</span>
+                </div>
+                <div style={{ padding: "8px 12px", borderRadius: 8, background: autoResult === "Pass" ? C.greenBg : C.coralBg, textAlign: "center" }}>
+                  <span style={{ fontWeight: 700, fontSize: 14, color: autoResult === "Pass" ? C.green : C.coral }}>
+                    {autoResult === "Pass" ? "✓ Pass" : "✗ Not passed"}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {!stageData && (
+            <div>
+              <FieldLabel>Result</FieldLabel>
+              <div style={{ display: "flex", gap: 8 }}>
+                {["Pass","Fail"].map(r => (
+                  <button key={r} onClick={() => setResult(r)} style={{
+                    flex: 1, padding: "8px", borderRadius: 8, fontSize: 14, fontWeight: 700, cursor: "pointer",
+                    border: `1.5px solid ${result === r ? (r === "Pass" ? C.green : C.coral) : C.border}`,
+                    background: result === r ? (r === "Pass" ? C.greenBg : C.coralBg) : "transparent",
+                    color: result === r ? (r === "Pass" ? C.green : C.coral) : C.muted,
+                  }}>{r === "Pass" ? "✓ Pass" : "✗ Fail"}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <Btn variant="primary" small onClick={addEntry} disabled={saving}>
+              {saving ? "Saving…" : "Save Eiken Record"}
+            </Btn>
+          </div>
+        </div>
+      )}
+
+      {history.length === 0 ? (
+        <p style={{ fontSize: 13, color: C.muted, textAlign: "center", padding: "20px 0" }}>No Eiken records yet.</p>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: `2px solid ${C.border}` }}>
+                {["Level","Year","Session","Stage","Score","Pass mark","Result","Sections"].map(h => (
+                  <th key={h} style={{ padding: "6px 10px", textAlign: "left", fontFamily: MONO, fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: .5, fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((e, i) => (
+                <tr key={e.id} style={{ borderBottom: `1px solid ${C.border}`, background: i % 2 === 0 ? C.bg : C.surface }}>
+                  <td style={{ padding: "8px 10px", fontWeight: 700, color: C.forest, whiteSpace: "nowrap" }}>{e.level}</td>
+                  <td style={{ padding: "8px 10px", fontFamily: MONO }}>{e.year}</td>
+                  <td style={{ padding: "8px 10px", fontSize: 12, color: C.textDim, whiteSpace: "nowrap" }}>{e.session.split(" ")[0]} {e.session.match(/\((.+)\)/)?.[1]}</td>
+                  <td style={{ padding: "8px 10px", fontSize: 12, color: C.textDim }}>{e.stage}</td>
+                  <td style={{ padding: "8px 10px", fontFamily: MONO, fontWeight: 700 }}>{e.totalScore || "—"}</td>
+                  <td style={{ padding: "8px 10px", fontFamily: MONO, color: C.muted }}>{e.passScore || "—"}</td>
+                  <td style={{ padding: "8px 10px" }}>
+                    <span style={{ fontWeight: 700, color: e.result === "Pass" ? C.green : C.coral }}>
+                      {e.result === "Pass" ? "✓ Pass" : "✗ Fail"}
+                    </span>
+                  </td>
+                  <td style={{ padding: "8px 10px", fontSize: 11, color: C.muted }}>
+                    {e.sections?.map(s => `${s.name}: ${s.score}`).join(" · ") || "—"}
+                  </td>
+                  <td style={{ padding: "8px 10px" }}>
+                    <button onClick={() => removeEntry(e.id)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 14, padding: 2 }} title="Remove">×</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Student Detail View (full profile page) ───────────────────────────────────
 function StudentDetailView({ profile, allRecords, onBack }) {
   const attended = profile.classes - profile.absent;
@@ -1092,6 +1545,27 @@ function StudentDetailView({ profile, allRecords, onBack }) {
   const negPct   = attended > 0 ? Math.round(profile.negative / attended * 100) : 0;
   const neuPct   = attended > 0 ? Math.round((attended - profile.positive - profile.negative - profile.flag) / attended * 100) : 0;
   const barColor = posPct >= 60 ? C.green : posPct >= 30 ? C.amber : C.coral;
+
+  const [studentRecord, setStudentRecord] = useState(null);
+  const [recordLoading, setRecordLoading] = useState(true);
+
+  useEffect(() => {
+    setRecordLoading(true);
+    loadStudentRecord(profile.name).then(data => {
+      setStudentRecord(data);
+      setRecordLoading(false);
+    }).catch(() => {
+      setStudentRecord({ testScores: [], eikenHistory: [] });
+      setRecordLoading(false);
+    });
+  }, [profile.name]);
+
+  // Merge partial saves (test scores save independently of Eiken history)
+  const handleRecordSave = async (partial) => {
+    const merged = { ...studentRecord, ...partial };
+    await saveStudentRecord(profile.name, merged);
+    setStudentRecord(merged);
+  };
 
   // Mark distribution pie
   const markData = [
@@ -1268,6 +1742,27 @@ function StudentDetailView({ profile, allRecords, onBack }) {
             })}
           </div>
         </div>
+      )}
+
+      {/* Test scores + Eiken */}
+      {recordLoading ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 20, background: C.surface, borderRadius: 12, marginBottom: 20 }}>
+          <div className="spin" style={{ width: 20, height: 20, border: `2px solid ${C.border}`, borderTopColor: C.forest, borderRadius: "50%" }} />
+          <span style={{ fontSize: 13, color: C.muted }}>Loading scores…</span>
+        </div>
+      ) : (
+        <>
+          <TestScoresSection
+            studentName={profile.name}
+            initialData={studentRecord}
+            onSave={handleRecordSave}
+          />
+          <EikenSection
+            studentName={profile.name}
+            initialData={studentRecord}
+            onSave={handleRecordSave}
+          />
+        </>
       )}
 
       {/* Full chronological log */}
