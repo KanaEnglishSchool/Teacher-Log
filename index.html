@@ -840,11 +840,56 @@ function aggregateCounts(records, field, options) {
   return counts;
 }
 
+// Split a full name into tokens for matching: "Tanaka Yuu" → ["tanaka", "yuu"]
+function nameTokens(fullName) {
+  return fullName.trim().toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+// Check whether a note mentions a student.
+// Rules:
+//  1. Only check students who are in the class this note was written for (rec.className matches).
+//  2. Build a list of all name tokens for every student in THAT class.
+//  3. For each token in THIS student's name: if the note contains that token AND no other
+//     student in the same class has the same token, it's an unambiguous match.
+//     If another student shares the token, require at least two tokens to match.
+function noteMatchesStudent(note, studentName, classStudentNames) {
+  const noteLower   = note.toLowerCase();
+  const myTokens    = nameTokens(studentName);
+
+  // tokens of other students in the same class
+  const otherTokenSets = classStudentNames
+    .filter(n => n !== studentName)
+    .map(n => nameTokens(n));
+
+  let matchedTokens = 0;
+  for (const tok of myTokens) {
+    // check as whole word — wrap in word-boundary-like check
+    const re = new RegExp(`(?:^|[\\s,、。!?]|$)${tok}(?:[\\s,、。!?]|$)`, "i");
+    if (re.test(note) || noteLower.includes(tok)) {
+      matchedTokens++;
+    }
+  }
+
+  if (matchedTokens === 0) return false;
+
+  // If another student in the same class shares ALL matched tokens, require
+  // additional tokens to distinguish (teacher should use last name).
+  const ambiguous = otherTokenSets.some(otherToks =>
+    myTokens.slice(0, matchedTokens).every(t => otherToks.includes(t))
+  );
+
+  // Ambiguous single-token match → only accept if we matched more than one token
+  if (ambiguous && matchedTokens < 2) return false;
+
+  return true;
+}
+
 function buildStudentProfiles(records) {
   const profiles = {};
   records.forEach(rec => {
-    const marks = rec.report?.marks || {};
-    const note  = rec.report?.note  || "";
+    const marks    = rec.report?.marks || {};
+    const note     = rec.report?.note  || "";
+    const classStudentNames = rec.studentNames; // all students in THIS class/slot
 
     rec.studentNames.forEach(name => {
       if (!profiles[name]) {
@@ -862,13 +907,16 @@ function buildStudentProfiles(records) {
       else if (m === "flag") p.flag++;
       else if (m === "absent") p.absent++;
 
-      // Collect teacher notes that mention this student's name (case-insensitive)
-      if (note && note.toLowerCase().includes(name.toLowerCase())) {
+      // Note matching: scoped to this student's class, handles first/last names
+      if (note && noteMatchesStudent(note, name, classStudentNames)) {
         p.mentions.push({
           note,
-          date:      rec.date,
-          className: rec.className,
-          mark:      m,
+          date:        rec.date,
+          className:   rec.className,
+          mark:        m,
+          mood:        rec.report?.mood        || "",
+          engagement:  rec.report?.engagement  || "",
+          performance: rec.report?.performance || "",
         });
       }
     });
@@ -1181,15 +1229,43 @@ function StudentDetailView({ profile, allRecords, onBack }) {
             💬 Teacher Notes Mentioning {profile.name}
           </p>
           <div style={{ display: "grid", gap: 10 }}>
-            {profile.mentions.map((m, i) => (
-              <div key={i} style={{ padding: "10px 14px", background: C.purpleBg, borderRadius: 9, borderLeft: `3px solid ${C.purple}` }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: C.purple }}>{m.className}</span>
-                  <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO }}>{fmtDateShort(m.date)}</span>
+            {profile.mentions.map((m, i) => {
+              const markIcon = { positive:"✓", negative:"✗", flag:"🚩", absent:"○", none:"—" }[m.mark] || "—";
+              const markCol  = { positive: C.green, negative: C.coral, flag: C.amber, absent: C.muted, none: C.muted }[m.mark] || C.muted;
+              return (
+                <div key={i} style={{ padding: "12px 14px", background: C.purpleBg, borderRadius: 9, borderLeft: `3px solid ${C.purple}` }}>
+                  {/* Header row */}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: C.purple }}>{m.className}</span>
+                    <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO }}>{fmtDateShort(m.date)}</span>
+                  </div>
+                  {/* Class ratings row */}
+                  <div style={{ display: "flex", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+                    {m.mood && (
+                      <span style={{ fontSize: 11, background: C.surface, borderRadius: 6, padding: "2px 8px", color: C.textDim }}>
+                        {m.mood.split(" ")[0]} {m.mood.replace(/^[^\s]+\s/, "")}
+                      </span>
+                    )}
+                    {m.engagement && (
+                      <span style={{ fontSize: 11, background: C.surface, borderRadius: 6, padding: "2px 8px", color: C.textDim }}>
+                        {m.engagement.split(" ")[0]} {m.engagement.replace(/^[^\s]+\s/, "")}
+                      </span>
+                    )}
+                    {m.performance && (
+                      <span style={{ fontSize: 11, background: C.surface, borderRadius: 6, padding: "2px 8px", color: C.textDim }}>
+                        {m.performance.split(" ")[0]} {m.performance.replace(/^[^\s]+\s/, "")}
+                      </span>
+                    )}
+                    {/* Student's own mark that day */}
+                    <span style={{ fontSize: 11, fontWeight: 700, color: markCol, background: C.surface, borderRadius: 6, padding: "2px 8px" }}>
+                      {markIcon} {m.mark === "none" ? "No mark" : m.mark}
+                    </span>
+                  </div>
+                  {/* The note itself */}
+                  <p style={{ fontSize: 13, color: C.text, lineHeight: 1.6 }}>{m.note}</p>
                 </div>
-                <p style={{ fontSize: 13, color: C.text, lineHeight: 1.6 }}>{m.note}</p>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -1249,6 +1325,7 @@ function AnalyticsView({ weekTemplates, onClose }) {
   const [activeTab,   setActiveTab]   = useState("overview");
   const [searchName,  setSearchName]  = useState("");
   const [selectedStudent, setSelectedStudent] = useState(null);
+  const [markFilter,  setMarkFilter]  = useState("All"); // All | positive | negative | flag | absent
 
   const range = rangeMode === "week" ? isoWeekRange(rangeOffset) : monthRange(rangeOffset);
 
@@ -1292,10 +1369,16 @@ function AnalyticsView({ weekTemplates, onClose }) {
     };
   }).filter(c => c.count > 0);
 
-  const students        = buildStudentProfiles(filtered);
-  const filteredStudents = searchName
-    ? students.filter(s => s.name.toLowerCase().includes(searchName.toLowerCase()))
-    : students;
+  const students = buildStudentProfiles(filtered);
+  const filteredStudents = students.filter(s => {
+    if (searchName && !s.name.toLowerCase().includes(searchName.toLowerCase())) return false;
+    if (markFilter === "positive") return s.positive > 0;
+    if (markFilter === "negative") return s.negative > 0;
+    if (markFilter === "flag")     return s.flag > 0;
+    if (markFilter === "absent")   return s.absent > 0;
+    if (markFilter === "mentions") return s.mentions.length > 0;
+    return true;
+  });
 
   const Tab = ({ id, label }) => (
     <button onClick={() => { setActiveTab(id); setSelectedStudent(null); }} style={{
@@ -1448,18 +1531,43 @@ function AnalyticsView({ weekTemplates, onClose }) {
                   />
                 ) : (
                   <>
-                    <div style={{ marginBottom: 16 }}>
-                      <input value={searchName} onChange={e => setSearchName(e.target.value)}
-                        placeholder="Search student name…"
-                        style={{ width: "100%", maxWidth: 300, background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", fontSize: 14, color: C.text, outline: "none" }}
-                        onFocus={e => e.target.style.borderColor = C.forest}
-                        onBlur={e => e.target.style.borderColor = C.border} />
-                      <span style={{ fontSize: 12, color: C.muted, marginLeft: 12 }}>
-                        {filteredStudents.length} student{filteredStudents.length !== 1 ? "s" : ""} · click any card to view full profile
-                      </span>
+                    {/* Search + mark filter */}
+                    <div style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                        <input value={searchName} onChange={e => setSearchName(e.target.value)}
+                          placeholder="Search student name…"
+                          style={{ width: "100%", maxWidth: 260, background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", fontSize: 14, color: C.text, outline: "none" }}
+                          onFocus={e => e.target.style.borderColor = C.forest}
+                          onBlur={e => e.target.style.borderColor = C.border} />
+                        <span style={{ fontSize: 12, color: C.muted }}>
+                          {filteredStudents.length} student{filteredStudents.length !== 1 ? "s" : ""} · tap a card for full profile
+                        </span>
+                      </div>
+                      {/* Mark filter chips */}
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                        <span style={{ fontSize: 11, color: C.muted, fontWeight: 700, textTransform: "uppercase", letterSpacing: .8, marginRight: 4 }}>Filter:</span>
+                        {[
+                          { id: "All",      label: "All",          bg: C.forest,  col: C.white  },
+                          { id: "positive", label: "✓ Positive",   bg: C.greenBg, col: C.green  },
+                          { id: "negative", label: "✗ Concern",    bg: C.coralBg, col: C.coral  },
+                          { id: "flag",     label: "🚩 Flagged",   bg: C.amberBg, col: C.amber  },
+                          { id: "absent",   label: "○ Absent",     bg: "#F3F4F6", col: "#6B7280" },
+                          { id: "mentions", label: "💬 Has notes", bg: C.purpleBg,col: C.purple },
+                        ].map(f => (
+                          <button key={f.id} onClick={() => setMarkFilter(f.id)} style={{
+                            padding: "5px 12px", borderRadius: 99, fontSize: 12, fontWeight: 700,
+                            border: `1.5px solid ${markFilter === f.id ? f.col : C.border}`,
+                            background: markFilter === f.id ? f.bg : "transparent",
+                            color: markFilter === f.id ? f.col : C.muted,
+                            cursor: "pointer", transition: "all .15s",
+                          }}>{f.label}</button>
+                        ))}
+                      </div>
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
-                      {filteredStudents.map(p => (
+                      {filteredStudents.length === 0 ? (
+                        <p style={{ fontSize: 13, color: C.muted, padding: 16 }}>No students match this filter.</p>
+                      ) : filteredStudents.map(p => (
                         <StudentProfileCard key={p.name} profile={p} onClick={() => setSelectedStudent(p)} />
                       ))}
                     </div>
