@@ -93,6 +93,11 @@ async function loadReportsInRange(fromDate, toDate) {
   return rows || [];
 }
 
+async function loadAllReportsEver() {
+  const rows = await sbGet("reports", `?order=id.asc`);
+  return rows || [];
+}
+
 // ── Design tokens ─────────────────────────────────────────────────────────────
 const C = {
   bg:           "#F8F6F1",
@@ -829,20 +834,43 @@ function buildAnalyticsRecords(rows, weekTemplates) {
     const parsed = parseReportId(row.id);
     if (!parsed) return;
     const { date, slotId } = parsed;
-    const dow = DAYS[new Date(date + "T12:00:00").getDay()];
-    const daySlots = weekTemplates?.[dow] || [];
-    const slot = daySlots.find(s => s.id === slotId);
-    if (!slot || !slot.className) return;
+    const snap = row.data?.snapshot;
+
+    let className, room, time, classType, level, studentNames;
+
+    if (snap && snap.className) {
+      // New-style report: it carries its own class details from the moment it
+      // was logged, so later template edits (rename, level change, roster change)
+      // can't retroactively alter it.
+      className    = snap.className;
+      room         = snap.room;
+      time         = snap.time;
+      classType    = snap.classType || "Other";
+      level        = snap.level     || "—";
+      studentNames = snap.studentNames || [];
+    } else {
+      // Old-style report saved before snapshots existed — fall back to looking
+      // the slot up in the current template (previous behavior).
+      const dow = DAYS[new Date(date + "T12:00:00").getDay()];
+      const daySlots = weekTemplates?.[dow] || [];
+      const slot = daySlots.find(s => s.id === slotId);
+      if (!slot || !slot.className) return;
+      className    = slot.className;
+      room         = slot.room;
+      time         = slot.time;
+      classType    = slot.classType || "Other";
+      level        = slot.level     || "—";
+      studentNames = slot.studentNames || [];
+    }
+
+    if (!className) return;
+
     records.push({
-      date, slotId, dow,
-      className:    slot.className,
-      room:         slot.room,
-      time:         slot.time,
-      classType:    slot.classType || "Other",
-      level:        slot.level     || "—",
-      studentNames: slot.studentNames || [],
-      report:       row.data,
-      savedAt:      row.saved_at,
+      date, slotId, dow: DAYS[new Date(date + "T12:00:00").getDay()],
+      className, room, time, classType, level,
+      studentNames,
+      report:  row.data,
+      savedAt: row.saved_at,
     });
   });
   return records;
@@ -1021,13 +1049,13 @@ function PieChart({ data, size = 140 }) {
 
 function PieLegend({ data, total }) {
   return (
-    <div style={{ display: "grid", gap: 5 }}>
+    <div style={{ display: "grid", gap: 5, minWidth: 0, width: "100%" }}>
       {data.filter(d => d.value > 0).map(d => (
-        <div key={d.label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div key={d.label} style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, width: "100%" }}>
           <div style={{ width: 10, height: 10, borderRadius: 3, background: d.color, flexShrink: 0 }} />
-          <span style={{ fontSize: 12, color: C.textDim, flex: 1 }}>{d.label.replace(/^.+?\s/, "")}</span>
-          <span style={{ fontSize: 12, fontWeight: 700, color: C.text, fontFamily: MONO }}>{d.value}</span>
-          <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO, minWidth: 36, textAlign: "right" }}>
+          <span style={{ fontSize: 12, color: C.textDim, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.label.replace(/^.+?\s/, "")}</span>
+          <span style={{ fontSize: 12, fontWeight: 700, color: C.text, fontFamily: MONO, flexShrink: 0 }}>{d.value}</span>
+          <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO, minWidth: 36, textAlign: "right", flexShrink: 0 }}>
             {total > 0 ? Math.round(d.value / total * 100) + "%" : "—"}
           </span>
         </div>
@@ -1042,9 +1070,11 @@ function MetricPie({ title, data }) {
     <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
       <p style={{ fontFamily: MONO, fontSize: 11, color: C.muted, textTransform: "uppercase",
         letterSpacing: 1, marginBottom: 14, fontWeight: 700 }}>{title}</p>
-      <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 20, alignItems: "center", minWidth: 0 }}>
         <PieChart data={data} size={120} />
-        <PieLegend data={data} total={total} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <PieLegend data={data} total={total} />
+        </div>
       </div>
     </div>
   );
@@ -1823,15 +1853,18 @@ function AnalyticsView({ weekTemplates, onClose }) {
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [markFilter,  setMarkFilter]  = useState("All"); // All | positive | negative | flag | absent
 
-  const range = rangeMode === "week" ? isoWeekRange(rangeOffset) : monthRange(rangeOffset);
+  const range = rangeMode === "week" ? isoWeekRange(rangeOffset)
+              : rangeMode === "month" ? monthRange(rangeOffset)
+              : { from: null, to: null, label: "All Time" };
 
   useEffect(() => {
     setLoading(true);
-    loadReportsInRange(range.from, range.to).then(rows => {
+    const loader = rangeMode === "overall" ? loadAllReportsEver() : loadReportsInRange(range.from, range.to);
+    loader.then(rows => {
       setRecords(buildAnalyticsRecords(rows, weekTemplates));
       setLoading(false);
     }).catch(() => setLoading(false));
-  }, [range.from, range.to]);
+  }, [rangeMode, range.from, range.to]);
 
   const filtered = records.filter(r => {
     if (filterType  !== "All" && r.classType !== filterType)  return false;
@@ -1866,7 +1899,7 @@ function AnalyticsView({ weekTemplates, onClose }) {
   }).filter(c => c.count > 0);
 
   const students = buildStudentProfiles(filtered);
-  const filteredStudents = students.filter(s => {
+  let filteredStudents = students.filter(s => {
     if (searchName && !s.name.toLowerCase().includes(searchName.toLowerCase())) return false;
     if (markFilter === "positive") return s.positive > 0;
     if (markFilter === "negative") return s.negative > 0;
@@ -1875,6 +1908,21 @@ function AnalyticsView({ weekTemplates, onClose }) {
     if (markFilter === "mentions") return s.mentions.length > 0;
     return true;
   });
+
+  // When a specific filter is active, sort most → least on that metric.
+  // "All" keeps the default alphabetical order from buildStudentProfiles.
+  const sortFieldByFilter = {
+    positive: "positive",
+    negative: "negative",
+    flag:     "flag",
+    absent:   "absent",
+  };
+  if (markFilter === "mentions") {
+    filteredStudents = [...filteredStudents].sort((a, b) => b.mentions.length - a.mentions.length);
+  } else if (sortFieldByFilter[markFilter]) {
+    const field = sortFieldByFilter[markFilter];
+    filteredStudents = [...filteredStudents].sort((a, b) => b[field] - a[field]);
+  }
 
   const Tab = ({ id, label }) => (
     <button onClick={() => { setActiveTab(id); setSelectedStudent(null); }} style={{
@@ -1902,18 +1950,27 @@ function AnalyticsView({ weekTemplates, onClose }) {
 
         <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap", alignItems: "center" }}>
           <div style={{ display: "flex", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 9, overflow: "hidden" }}>
-            {["week","month"].map(m => (
+            {["week","month","overall"].map(m => (
               <button key={m} onClick={() => { setRangeMode(m); setRangeOffset(0); }} style={{
                 padding: "6px 16px", border: "none", fontWeight: 700, fontSize: 13, cursor: "pointer",
                 background: rangeMode === m ? C.forest : "transparent",
                 color: rangeMode === m ? C.white : C.textDim, transition: "all .15s",
-              }}>{m === "week" ? "Weekly" : "Monthly"}</button>
+              }}>{m === "week" ? "Weekly" : m === "month" ? "Monthly" : "Overall"}</button>
             ))}
           </div>
-          <button onClick={() => setRangeOffset(o => o - 1)} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7, padding: "6px 12px", cursor: "pointer", fontSize: 16, color: C.text }}>‹</button>
-          <span style={{ fontFamily: SERIF, fontSize: 16, color: C.forest, minWidth: 160, textAlign: "center" }}>{range.label}</span>
-          <button onClick={() => setRangeOffset(o => Math.min(o + 1, 0))} disabled={rangeOffset >= 0}
-            style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7, padding: "6px 12px", cursor: "pointer", fontSize: 16, color: C.text, opacity: rangeOffset >= 0 ? .4 : 1 }}>›</button>
+          {rangeMode !== "overall" && (
+            <>
+              <button onClick={() => setRangeOffset(o => o - 1)} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7, padding: "6px 12px", cursor: "pointer", fontSize: 16, color: C.text }}>‹</button>
+              <span style={{ fontFamily: SERIF, fontSize: 16, color: C.forest, minWidth: 160, textAlign: "center" }}>{range.label}</span>
+              <button onClick={() => setRangeOffset(o => Math.min(o + 1, 0))} disabled={rangeOffset >= 0}
+                style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7, padding: "6px 12px", cursor: "pointer", fontSize: 16, color: C.text, opacity: rangeOffset >= 0 ? .4 : 1 }}>›</button>
+            </>
+          )}
+          {rangeMode === "overall" && (
+            <span style={{ fontFamily: SERIF, fontSize: 16, color: C.forest, minWidth: 160, textAlign: "center" }}>
+              {range.label} <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>— since you started logging</span>
+            </span>
+          )}
           <select value={filterType} onChange={e => setFilterType(e.target.value)} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7, padding: "6px 10px", fontSize: 13, color: C.text, cursor: "pointer" }}>
             <option value="All">All class types</option>
             {CLASS_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
@@ -2125,8 +2182,23 @@ function App() {
   const handleSaveReport = async (slot, report) => {
     setSyncStatus("saving");
     try {
-      await saveReport(date, slot.id, report);
-      setDayReports(prev => ({ ...prev, [slot.id]: report }));
+      // Snapshot the class details as they are right now. This is what makes class
+      // changes safe: if the class gets renamed (e.g. "Look 0" → "Look 1") or a
+      // student is moved to a different class later, this saved report keeps
+      // pointing at the class name / level / roster it actually happened under.
+      const enrichedReport = {
+        ...report,
+        snapshot: {
+          className:    slot.className,
+          classType:    slot.classType,
+          level:        slot.level,
+          room:         slot.room,
+          time:         slot.time,
+          studentNames: slot.studentNames,
+        },
+      };
+      await saveReport(date, slot.id, enrichedReport);
+      setDayReports(prev => ({ ...prev, [slot.id]: enrichedReport }));
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus(null), 2500);
     } catch (e) {
