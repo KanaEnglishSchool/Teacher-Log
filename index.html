@@ -88,6 +88,16 @@ async function saveStudentRecord(studentName, data) {
   });
 }
 
+// Loads every student's CS record in one call (name → record map). Used by the
+// analytics list views so health scoring can see onboarding/follow-up data for
+// every student, not just the one currently open.
+async function loadAllStudentRecords() {
+  const rows = await sbGet("student_records", `?order=id.asc`);
+  const map = {};
+  (rows || []).forEach(r => { map[r.id] = r.data; });
+  return map;
+}
+
 async function loadReportsInRange(fromDate, toDate) {
   const rows = await sbGet("reports", `?id=gte.${fromDate}&id=lte.${toDate}_zzz&order=id.asc`);
   return rows || [];
@@ -329,7 +339,7 @@ function StudentMark({ name, mark, onChange }) {
       }}>{name}</span>
       <div style={{ display: "flex", gap: 5 }}>
         {[
-          { type: "positive", icon: "✓",  title: "Positive" },
+          { type: "positive", icon: "✓",  title: "Stood out" },
           { type: "negative", icon: "✗",  title: "Concern"  },
           { type: "flag",     icon: "🚩", title: "Flag"     },
           { type: "absent",   icon: "○",  title: "Absent"   },
@@ -421,7 +431,7 @@ function ReportModal({ slot, existing, onSave, onClose }) {
                 {counts.abs > 0 && <span style={{ color:C.muted, fontWeight:700 }}>○ {counts.abs} absent</span>}
               </div>
             </div>
-            <p style={{ fontSize:12, color:C.muted, marginBottom:10 }}>Only mark students worth noting. Unmarked = fine.</p>
+            <p style={{ fontSize:12, color:C.muted, marginBottom:10 }}>✓ is reserved for students who stood out this class. Unmarked = normal, not a concern.</p>
             <div style={{ display:"grid", gap:6 }}>
               {slot.studentNames.map(name => (
                 <StudentMark key={name} name={name} mark={getMark(name)} onChange={m => setMark(name, m)} />
@@ -994,30 +1004,73 @@ function buildStudentProfiles(records) {
 }
 
 // ── Customer health score ─────────────────────────────────────────────────────
-// Computed from data the school already logs: attendance, marks, concern rates.
-// Transparent rules, no magic weights — the reasons are shown to the teacher.
-function computeStudentHealth(profile) {
+// Positive marks are reserved for standout moments (see ReportModal hint), so a
+// LOW positive rate is normal and is deliberately NOT used as a risk signal —
+// otherwise every quiet, well-behaved student would look "at risk" for the crime
+// of not having a stand-out day. Risk instead comes from three places:
+//   1. Attendance — the student is disengaging physically
+//   2. Concerns/flags — actual logged negative behavior/performance
+//   3. Process gaps — onboarding steps overdue, or an unresolved parent
+//      follow-up sitting open. These are service failures, not the student's.
+// Transparent rules, no magic weights — every reason is shown to the teacher.
+const HEALTH_RANK = { red: 0, yellow: 1, new: 2, green: 3 };
+const HEALTH_ICON = { red: "🔴", yellow: "🟡", new: "⚪", green: "🟢" };
+
+// Only ever moves a level toward worse (red < yellow < new < green in HEALTH_RANK).
+const worseLevel = (current, candidate) =>
+  HEALTH_RANK[candidate] < HEALTH_RANK[current] ? candidate : current;
+
+// `record` is the student_records row (onboarding / parentComments) if it has
+// been loaded; procedural checks are simply skipped when it hasn't (e.g. list
+// views that haven't fetched every student's record yet).
+function computeStudentHealth(profile, record) {
   const attended = profile.classes - profile.absent;
   if (profile.classes < 3) {
     return { level: "new", color: "#6B7280", bg: "#F3F4F6", label: "New",
-      reasons: ["Fewer than 3 logged classes — not enough data yet"], attPct: null, posPct: null };
+      reasons: ["Fewer than 3 logged classes — not enough data yet"], attPct: null };
   }
   const attPct     = Math.round(attended / profile.classes * 100);
-  const posPct     = attended > 0 ? Math.round(profile.positive / attended * 100) : 0;
-  const concerns   = profile.negative + profile.flag;
-  const concernPct = attended > 0 ? Math.round(concerns / attended * 100) : 0;
+  const concernPct = attended > 0 ? Math.round((profile.negative + profile.flag) / attended * 100) : 0;
 
   const reasons = [];
   let level = "green";
 
-  if (attPct < 85)                    { reasons.push(`Attendance ${attPct}%`); level = "yellow"; }
-  if (posPct < 25 && attended >= 4)   { reasons.push(`Low positive rate (${posPct}%)`); level = "yellow"; }
-  if (concernPct >= 25)               { reasons.push(`Concern/flag rate ${concernPct}%`); level = "yellow"; }
-  if (attPct < 70)                    { reasons.push(`Attendance critically low (${attPct}%)`); level = "red"; }
-  if (concernPct >= 40)               { reasons.push("Frequent concerns/flags"); level = "red"; }
-  if (profile.negative > profile.positive && attended >= 4) { reasons.push("More concerns than positives"); level = "red"; }
+  // 1. Attendance
+  if (attPct < 85) { reasons.push(`Attendance ${attPct}%`); level = worseLevel(level, "yellow"); }
+  if (attPct < 70) { reasons.push(`Attendance critically low (${attPct}%)`); level = worseLevel(level, "red"); }
 
-  if (level === "green") reasons.push("Attendance and marks look healthy");
+  // 2. Concerns / flags — the actual behavior/performance signal
+  if (concernPct >= 25) { reasons.push(`Concern/flag rate ${concernPct}%`); level = worseLevel(level, "yellow"); }
+  if (concernPct >= 40) { reasons.push("Frequent concerns/flags"); level = worseLevel(level, "red"); }
+  if (profile.negative >= 3) { reasons.push(`${profile.negative} negative marks logged`); level = worseLevel(level, "red"); }
+  else if (profile.flag >= 2) { reasons.push(`${profile.flag} flags logged`); level = worseLevel(level, "yellow"); }
+
+  // 3. Procedural issues — only checkable once the student's CS record is loaded
+  if (record) {
+    const openFollowUps = (record.parentComments || []).filter(c => c.followUp).length;
+    if (openFollowUps > 0) {
+      reasons.push(`${openFollowUps} unresolved parent follow-up${openFollowUps > 1 ? "s" : ""}`);
+      level = worseLevel(level, openFollowUps >= 2 ? "red" : "yellow");
+    }
+
+    const ob = record.onboarding;
+    if (ob && ob.startDate) {
+      const daysSince = Math.floor((Date.now() - new Date(ob.startDate + "T12:00:00").getTime()) / 86400000);
+      const items = ob.items || {};
+      const phaseIncomplete = (phase) =>
+        ONBOARDING_ITEMS.filter(i => i.phase === phase).some(i => !items[i.id]);
+      let overduePhases = 0;
+      if (daysSince >= 30 && phaseIncomplete(30)) overduePhases++;
+      if (daysSince >= 60 && phaseIncomplete(60)) overduePhases++;
+      if (daysSince >= 90 && phaseIncomplete(90)) overduePhases++;
+      if (overduePhases > 0) {
+        reasons.push(`Onboarding steps overdue (day ${daysSince})`);
+        level = worseLevel(level, overduePhases >= 2 ? "red" : "yellow");
+      }
+    }
+  }
+
+  if (level === "green") reasons.push("No attendance, behavior, or process concerns");
 
   const meta = {
     green:  { color: C.green, bg: C.greenBg, label: "Healthy" },
@@ -1025,11 +1078,8 @@ function computeStudentHealth(profile) {
     red:    { color: C.coral, bg: C.coralBg, label: "At Risk" },
   }[level];
 
-  return { level, ...meta, reasons, attPct, posPct };
+  return { level, ...meta, reasons, attPct };
 }
-
-const HEALTH_RANK = { red: 0, yellow: 1, new: 2, green: 3 };
-const HEALTH_ICON = { red: "🔴", yellow: "🟡", new: "⚪", green: "🟢" };
 
 function isoWeekRange(offset = 0) {
   const now = new Date();
@@ -1142,12 +1192,11 @@ function MetricPie({ title, data }) {
 }
 
 // ── Student Profile Card (clickable summary) ──────────────────────────────────
-function StudentProfileCard({ profile, onClick }) {
+function StudentProfileCard({ profile, health, onClick }) {
   const attended = profile.classes - profile.absent;
   const attPct   = profile.classes > 0 ? Math.round(attended / profile.classes * 100) : 0;
   const posPct   = attended > 0 ? Math.round(profile.positive / attended * 100) : 0;
   const barColor = posPct >= 60 ? C.green : posPct >= 30 ? C.amber : C.coral;
-  const health   = computeStudentHealth(profile);
 
   return (
     <div onClick={onClick} style={{
@@ -1176,7 +1225,7 @@ function StudentProfileCard({ profile, onClick }) {
       </div>
       <div style={{ marginBottom: 8 }}>
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-          <span style={{ fontSize: 11, color: C.textDim }}>Positive rate</span>
+          <span style={{ fontSize: 11, color: C.textDim }}>Standout rate</span>
           <span style={{ fontSize: 11, fontWeight: 700, color: barColor, fontFamily: MONO }}>{posPct}%</span>
         </div>
         <div style={{ height: 6, background: C.border, borderRadius: 99, overflow: "hidden" }}>
@@ -1970,7 +2019,6 @@ function StudentDetailView({ profile, allRecords, onBack }) {
   const negPct   = attended > 0 ? Math.round(profile.negative / attended * 100) : 0;
   const neuPct   = attended > 0 ? Math.round((attended - profile.positive - profile.negative - profile.flag) / attended * 100) : 0;
   const barColor = posPct >= 60 ? C.green : posPct >= 30 ? C.amber : C.coral;
-  const health   = computeStudentHealth(profile);
 
   const [studentRecord, setStudentRecord] = useState(null);
   const [recordLoading, setRecordLoading] = useState(true);
@@ -1985,6 +2033,10 @@ function StudentDetailView({ profile, allRecords, onBack }) {
       setRecordLoading(false);
     });
   }, [profile.name]);
+
+  // Includes procedural checks (onboarding overdue, open follow-ups) once
+  // studentRecord has loaded; before that it falls back to attendance/marks only.
+  const health = computeStudentHealth(profile, studentRecord);
 
   // Merge partial saves (each section saves independently of the others)
   const handleRecordSave = async (partial) => {
@@ -2054,7 +2106,7 @@ function StudentDetailView({ profile, allRecords, onBack }) {
             </div>
             <div style={{ background: C.bg, borderRadius: 9, padding: "10px 16px" }}>
               <p style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: barColor }}>{posPct}%</p>
-              <p style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>Positive rate</p>
+              <p style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>Standout rate</p>
             </div>
           </div>
         </div>
@@ -2278,6 +2330,7 @@ function AnalyticsView({ weekTemplates, onClose }) {
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [markFilter,  setMarkFilter]  = useState("All"); // All | positive | negative | flag | absent | mentions | health-red | health-yellow
   const [sortBy,      setSortBy]      = useState("auto"); // auto | health | name | attendance | positive | classes
+  const [studentRecords, setStudentRecords] = useState({}); // name -> CS record, for procedural health checks
 
   const range = rangeMode === "week" ? isoWeekRange(rangeOffset)
               : rangeMode === "month" ? monthRange(rangeOffset)
@@ -2291,6 +2344,15 @@ function AnalyticsView({ weekTemplates, onClose }) {
       setLoading(false);
     }).catch(() => setLoading(false));
   }, [rangeMode, range.from, range.to]);
+
+  // CS records don't depend on the date range — load once.
+  useEffect(() => {
+    loadAllStudentRecords().then(setStudentRecords).catch(() => setStudentRecords({}));
+  }, []);
+
+  // Health lookup used throughout this view — pulls in the matching CS record
+  // (onboarding/follow-up data) so procedural issues count toward the score.
+  const getHealth = (s) => computeStudentHealth(s, studentRecords[s.name]);
 
   const filtered = records.filter(r => {
     if (filterType  !== "All" && r.classType !== filterType)  return false;
@@ -2332,8 +2394,8 @@ function AnalyticsView({ weekTemplates, onClose }) {
     if (markFilter === "flag")          return s.flag > 0;
     if (markFilter === "absent")        return s.absent > 0;
     if (markFilter === "mentions")      return s.mentions.length > 0;
-    if (markFilter === "health-red")    return computeStudentHealth(s).level === "red";
-    if (markFilter === "health-yellow") return computeStudentHealth(s).level === "yellow";
+    if (markFilter === "health-red")    return getHealth(s).level === "red";
+    if (markFilter === "health-yellow") return getHealth(s).level === "yellow";
     return true;
   });
 
@@ -2346,7 +2408,7 @@ function AnalyticsView({ weekTemplates, onClose }) {
     flag:     "flag",
     absent:   "absent",
   };
-  const healthRankOf = (s) => HEALTH_RANK[computeStudentHealth(s).level];
+  const healthRankOf = (s) => HEALTH_RANK[getHealth(s).level];
   const attRateOf    = (s) => s.classes > 0 ? (s.classes - s.absent) / s.classes : 1;
   const posRateOf    = (s) => { const at = s.classes - s.absent; return at > 0 ? s.positive / at : 0; };
 
@@ -2580,7 +2642,7 @@ function AnalyticsView({ weekTemplates, onClose }) {
                       {filteredStudents.length === 0 ? (
                         <p style={{ fontSize: 13, color: C.muted, padding: 16 }}>No students match this filter.</p>
                       ) : filteredStudents.map(p => (
-                        <StudentProfileCard key={p.name} profile={p} onClick={() => setSelectedStudent(p)} />
+                        <StudentProfileCard key={p.name} profile={p} health={getHealth(p)} onClick={() => setSelectedStudent(p)} />
                       ))}
                     </div>
                   </>
