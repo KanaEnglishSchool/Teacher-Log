@@ -71,13 +71,13 @@ async function saveReport(date, slotId, report) {
   await sbUpsert("reports", { id, data: report, saved_at: new Date().toISOString() });
 }
 
-// ── Student records (test scores + Eiken) ─────────────────────────────────────
+// ── Student records (test scores + Eiken + CS data) ───────────────────────────
 async function loadStudentRecord(studentName) {
   try {
     const rows = await sbGet("student_records", `?id=eq.${encodeURIComponent(studentName)}`);
     if (rows && rows.length > 0) return rows[0].data;
   } catch {}
-  return { testScores: [], eikenHistory: [] };
+  return { testScores: [], eikenHistory: [], parentComments: [], referrals: [], onboarding: null };
 }
 
 async function saveStudentRecord(studentName, data) {
@@ -362,6 +362,7 @@ function ReportModal({ slot, existing, onSave, onClose }) {
   const [performance, setPerformance] = useState(existing?.performance || PERFORMANCE[1]);
   const [note,        setNote]        = useState(existing?.note        || "");
   const [marks,       setMarks]       = useState(existing?.marks       || {});
+  const [feedbackSent, setFeedbackSent] = useState(existing?.feedbackSent || false);
   const [saving,      setSaving]      = useState(false);
 
   const setMark = (name, m) => setMarks(prev => ({ ...prev, [name]: m }));
@@ -376,7 +377,7 @@ function ReportModal({ slot, existing, onSave, onClose }) {
 
   const handleSave = async () => {
     setSaving(true);
-    await onSave({ mood, engagement, performance, note, marks, savedAt: new Date().toISOString() });
+    await onSave({ mood, engagement, performance, note, marks, feedbackSent, savedAt: new Date().toISOString() });
     setSaving(false);
     onClose();
   };
@@ -429,7 +430,7 @@ function ReportModal({ slot, existing, onSave, onClose }) {
           </div>
         )}
 
-        <div style={{ marginBottom:20 }}>
+        <div style={{ marginBottom:14 }}>
           <FieldLabel hint="optional">Teacher note</FieldLabel>
           <textarea value={note} onChange={e => setNote(e.target.value)} rows={2}
             placeholder="Anything else worth recording..."
@@ -438,6 +439,26 @@ function ReportModal({ slot, existing, onSave, onClose }) {
             onFocus={e => e.target.style.borderColor = C.forest}
             onBlur={e => e.target.style.borderColor = C.border} />
         </div>
+
+        <label style={{
+          display:"flex", alignItems:"center", gap:10, cursor:"pointer",
+          padding:"11px 14px", borderRadius:9, marginBottom:20,
+          background: feedbackSent ? C.greenBg : C.bg,
+          border:`1.5px solid ${feedbackSent ? C.green : C.border}`,
+          transition:"all .15s",
+        }}>
+          <input type="checkbox" checked={feedbackSent}
+            onChange={e => setFeedbackSent(e.target.checked)}
+            style={{ width:17, height:17, accentColor:C.green, cursor:"pointer" }} />
+          <div>
+            <span style={{ fontSize:13, fontWeight:700, color: feedbackSent ? C.green : C.textMid }}>
+              ✉ Feedback sent to parents
+            </span>
+            <p style={{ fontSize:11, color:C.muted, marginTop:1 }}>
+              Check when the positive marks / notes were relayed (Output Relay)
+            </p>
+          </div>
+        </label>
 
         <div style={{ display:"flex", gap:10, justifyContent:"flex-end", alignItems:"center" }}>
           <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
@@ -763,6 +784,7 @@ function SlotCard({ slot, report, onLog, onEditTemplate, isCurrent }) {
                 {counts.neg > 0 && <span style={{ color:C.coral, fontWeight:700 }}>✗ {counts.neg}</span>}
                 {counts.fl  > 0 && <span style={{ color:C.amber, fontWeight:700 }}>🚩 {counts.fl}</span>}
                 {counts.abs > 0 && <span style={{ color:C.muted, fontWeight:700 }}>○ {counts.abs}</span>}
+                {report.feedbackSent && <span style={{ color:C.blue, fontWeight:700 }} title="Feedback sent to parents">✉ sent</span>}
               </div>
             )}
 
@@ -963,12 +985,51 @@ function buildStudentProfiles(records) {
           mood:        rec.report?.mood        || "",
           engagement:  rec.report?.engagement  || "",
           performance: rec.report?.performance || "",
+          feedbackSent: rec.report?.feedbackSent || false,
         });
       }
     });
   });
   return Object.values(profiles).sort((a, b) => a.name.localeCompare(b.name));
 }
+
+// ── Customer health score ─────────────────────────────────────────────────────
+// Computed from data the school already logs: attendance, marks, concern rates.
+// Transparent rules, no magic weights — the reasons are shown to the teacher.
+function computeStudentHealth(profile) {
+  const attended = profile.classes - profile.absent;
+  if (profile.classes < 3) {
+    return { level: "new", color: "#6B7280", bg: "#F3F4F6", label: "New",
+      reasons: ["Fewer than 3 logged classes — not enough data yet"], attPct: null, posPct: null };
+  }
+  const attPct     = Math.round(attended / profile.classes * 100);
+  const posPct     = attended > 0 ? Math.round(profile.positive / attended * 100) : 0;
+  const concerns   = profile.negative + profile.flag;
+  const concernPct = attended > 0 ? Math.round(concerns / attended * 100) : 0;
+
+  const reasons = [];
+  let level = "green";
+
+  if (attPct < 85)                    { reasons.push(`Attendance ${attPct}%`); level = "yellow"; }
+  if (posPct < 25 && attended >= 4)   { reasons.push(`Low positive rate (${posPct}%)`); level = "yellow"; }
+  if (concernPct >= 25)               { reasons.push(`Concern/flag rate ${concernPct}%`); level = "yellow"; }
+  if (attPct < 70)                    { reasons.push(`Attendance critically low (${attPct}%)`); level = "red"; }
+  if (concernPct >= 40)               { reasons.push("Frequent concerns/flags"); level = "red"; }
+  if (profile.negative > profile.positive && attended >= 4) { reasons.push("More concerns than positives"); level = "red"; }
+
+  if (level === "green") reasons.push("Attendance and marks look healthy");
+
+  const meta = {
+    green:  { color: C.green, bg: C.greenBg, label: "Healthy" },
+    yellow: { color: C.amber, bg: C.amberBg, label: "Watch"   },
+    red:    { color: C.coral, bg: C.coralBg, label: "At Risk" },
+  }[level];
+
+  return { level, ...meta, reasons, attPct, posPct };
+}
+
+const HEALTH_RANK = { red: 0, yellow: 1, new: 2, green: 3 };
+const HEALTH_ICON = { red: "🔴", yellow: "🟡", new: "⚪", green: "🟢" };
 
 function isoWeekRange(offset = 0) {
   const now = new Date();
@@ -1086,18 +1147,26 @@ function StudentProfileCard({ profile, onClick }) {
   const attPct   = profile.classes > 0 ? Math.round(attended / profile.classes * 100) : 0;
   const posPct   = attended > 0 ? Math.round(profile.positive / attended * 100) : 0;
   const barColor = posPct >= 60 ? C.green : posPct >= 30 ? C.amber : C.coral;
+  const health   = computeStudentHealth(profile);
 
   return (
     <div onClick={onClick} style={{
       background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10,
       padding: "14px 16px", cursor: "pointer", transition: "all .15s",
+      borderLeft: `4px solid ${health.color}`,
     }}
       onMouseEnter={e => { e.currentTarget.style.borderColor = C.forest; e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 4px 14px rgba(0,0,0,.08)"; }}
       onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "none"; }}
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
         <div>
-          <p style={{ fontWeight: 700, fontSize: 15, color: C.forest }}>{profile.name}</p>
+          <p style={{ fontWeight: 700, fontSize: 15, color: C.forest }}>
+            {profile.name}{" "}
+            <span style={{ fontSize: 10, fontWeight: 800, color: health.color, background: health.bg,
+              padding: "2px 8px", borderRadius: 99, verticalAlign: "middle" }}>
+              {HEALTH_ICON[health.level]} {health.label}
+            </span>
+          </p>
           <p style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{[...profile.classNames].join(", ")}</p>
         </div>
         <div style={{ textAlign: "right" }}>
@@ -1152,6 +1221,32 @@ const SCHOOL_TERMS = ["Term 1","Term 2","Term 3","Term 4"];
 const CURRENT_YEAR = new Date().getFullYear();
 const YEARS = Array.from({ length: 6 }, (_, i) => String(CURRENT_YEAR - i));
 const EIKEN_SESSIONS = ["第1回 (June)","第2回 (October)","第3回 (January)"];
+
+// ── Onboarding checklist (30/60/90) ───────────────────────────────────────────
+const ONBOARDING_ITEMS = [
+  { id: "welcome",        phase: 30, label: "Welcome packet given to parents" },
+  { id: "firstUpdate",    phase: 30, label: "First parent update sent" },
+  { id: "firstRelay",     phase: 30, label: "First Output Relay cycle completed" },
+  { id: "videoShared",    phase: 60, label: "Lesson explanation videos shared" },
+  { id: "checkIn",        phase: 60, label: "Parent check-in conversation done" },
+  { id: "secondRelay",    phase: 60, label: "Second Output Relay cycle completed" },
+  { id: "progressReport", phase: 90, label: "First progress report delivered" },
+  { id: "parentQA",       phase: 90, label: "Parent questions answered" },
+  { id: "referralInvite", phase: 90, label: "Referral invitation mentioned" },
+];
+
+const COMMENT_TYPES = [
+  { id: "positive", label: "😊 Positive",  color: C.green,  bg: C.greenBg  },
+  { id: "concern",  label: "😟 Concern",   color: C.coral,  bg: C.coralBg  },
+  { id: "request",  label: "🙏 Request",   color: C.blue,   bg: C.blueBg   },
+  { id: "note",     label: "📝 Note",      color: C.purple, bg: C.purpleBg },
+];
+
+const REFERRAL_STATUSES = [
+  { id: "mentioned", label: "Mentioned", color: C.amber, bg: C.amberBg },
+  { id: "visited",   label: "Visited",   color: C.blue,  bg: C.blueBg  },
+  { id: "joined",    label: "Joined ✓",  color: C.green, bg: C.greenBg },
+];
 
 // ── SVG Line Chart ────────────────────────────────────────────────────────────
 function LineChart({ points, maxY = 100, minY = 0, width = 400, height = 160, passLine }) {
@@ -1213,6 +1308,305 @@ function LineChart({ points, maxY = 100, minY = 0, width = 400, height = 160, pa
         ))}
       </g>
     </svg>
+  );
+}
+
+// ── Onboarding 30/60/90 Section ───────────────────────────────────────────────
+function OnboardingSection({ initialData, onSave }) {
+  const ob = initialData?.onboarding || { startDate: "", items: {} };
+  const [startDate, setStartDate] = useState(ob.startDate || "");
+  const [items,     setItems]     = useState(ob.items || {});
+  const [saving,    setSaving]    = useState(false);
+
+  const done = ONBOARDING_ITEMS.filter(i => items[i.id]).length;
+  const pct  = Math.round(done / ONBOARDING_ITEMS.length * 100);
+  const daysSince = startDate ? Math.floor((Date.now() - new Date(startDate + "T12:00:00").getTime()) / 86400000) : null;
+
+  const persist = async (nextItems, nextStart) => {
+    setSaving(true);
+    try { await onSave({ onboarding: { startDate: nextStart, items: nextItems } }); }
+    finally { setSaving(false); }
+  };
+
+  const toggle = (id) => {
+    const ni = { ...items, [id]: !items[id] };
+    setItems(ni);
+    persist(ni, startDate);
+  };
+
+  const changeStart = (v) => {
+    setStartDate(v);
+    persist(items, v);
+  };
+
+  const phases = [30, 60, 90];
+
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18, marginBottom: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <p style={{ fontFamily: MONO, fontSize: 11, color: C.forest, textTransform: "uppercase", letterSpacing: 1, fontWeight: 700 }}>
+            🚀 Onboarding — 30 / 60 / 90 Days
+          </p>
+          {daysSince !== null && daysSince >= 0 && (
+            <p style={{ fontSize: 12, color: C.textDim, marginTop: 3 }}>
+              Day <strong style={{ color: C.forest }}>{daysSince}</strong> since start
+              {saving && <span style={{ color: C.amber, marginLeft: 8, fontFamily: MONO, fontSize: 11 }}>saving…</span>}
+            </p>
+          )}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 11, color: C.muted }}>Started:</span>
+          <input type="date" value={startDate} onChange={e => changeStart(e.target.value)}
+            style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 7,
+              padding: "5px 9px", fontSize: 12, color: C.text, outline: "none" }} />
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+          <span style={{ fontSize: 11, color: C.textDim }}>{done}/{ONBOARDING_ITEMS.length} complete</span>
+          <span style={{ fontSize: 11, fontWeight: 700, fontFamily: MONO, color: pct === 100 ? C.green : C.amber }}>{pct}%</span>
+        </div>
+        <div style={{ height: 7, background: C.border, borderRadius: 99, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${pct}%`, background: pct === 100 ? C.green : C.amber, borderRadius: 99, transition: "width .3s" }} />
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
+        {phases.map(phase => (
+          <div key={phase} style={{ background: C.bg, borderRadius: 9, padding: "10px 12px" }}>
+            <p style={{ fontSize: 10, fontWeight: 800, color: C.muted, textTransform: "uppercase", letterSpacing: .8, marginBottom: 8 }}>
+              {phase === 30 ? "First 30 days" : phase === 60 ? "31–60 days" : "61–90 days"}
+            </p>
+            <div style={{ display: "grid", gap: 6 }}>
+              {ONBOARDING_ITEMS.filter(i => i.phase === phase).map(item => {
+                const checked = !!items[item.id];
+                return (
+                  <label key={item.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+                    <input type="checkbox" checked={checked} onChange={() => toggle(item.id)}
+                      style={{ width: 15, height: 15, marginTop: 1, accentColor: C.green, cursor: "pointer", flexShrink: 0 }} />
+                    <span style={{ fontSize: 12, lineHeight: 1.4,
+                      color: checked ? C.muted : C.textMid,
+                      textDecoration: checked ? "line-through" : "none" }}>
+                      {item.label}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Parent Comments Section ───────────────────────────────────────────────────
+function ParentCommentsSection({ initialData, onSave }) {
+  const [comments, setComments] = useState(initialData?.parentComments || []);
+  const [adding,   setAdding]   = useState(false);
+  const [saving,   setSaving]   = useState(false);
+  // form
+  const [text,     setText]     = useState("");
+  const [type,     setType]     = useState("positive");
+  const [cDate,    setCDate]    = useState(todayStr());
+  const [followUp, setFollowUp] = useState(false);
+
+  const persist = async (next) => {
+    setSaving(true);
+    try { await onSave({ parentComments: next }); setComments(next); }
+    finally { setSaving(false); }
+  };
+
+  const add = async () => {
+    if (!text.trim()) return;
+    const entry = { id: Date.now(), date: cDate, type, text: text.trim(), followUp };
+    await persist([entry, ...comments]);
+    setText(""); setFollowUp(false); setAdding(false);
+  };
+
+  const toggleFollowUp = (id) => {
+    persist(comments.map(c => c.id === id ? { ...c, followUp: !c.followUp } : c));
+  };
+
+  const remove = (id) => persist(comments.filter(c => c.id !== id));
+
+  const needsFollowUp = comments.filter(c => c.followUp).length;
+  const fmtShort = (d) => new Date(d + "T12:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "2-digit" });
+
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18, marginBottom: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <div>
+          <p style={{ fontFamily: MONO, fontSize: 11, color: C.blue, textTransform: "uppercase", letterSpacing: 1, fontWeight: 700 }}>
+            💬 Parent Comments &amp; Notes
+          </p>
+          {needsFollowUp > 0 && (
+            <p style={{ fontSize: 12, color: C.coral, marginTop: 3, fontWeight: 600 }}>
+              ⚠ {needsFollowUp} need{needsFollowUp === 1 ? "s" : ""} follow-up
+            </p>
+          )}
+        </div>
+        <Btn variant="ghost" small onClick={() => setAdding(!adding)}>{adding ? "Cancel" : "+ Add"}</Btn>
+      </div>
+
+      {adding && (
+        <div style={{ background: C.bg, borderRadius: 10, padding: 14, marginBottom: 14, display: "grid", gap: 12 }}>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {COMMENT_TYPES.map(t => (
+              <button key={t.id} onClick={() => setType(t.id)} style={{
+                padding: "5px 12px", borderRadius: 99, fontSize: 12, fontWeight: 700, cursor: "pointer",
+                border: `1.5px solid ${type === t.id ? t.color : C.border}`,
+                background: type === t.id ? t.bg : "transparent",
+                color: type === t.id ? t.color : C.muted,
+              }}>{t.label}</button>
+            ))}
+          </div>
+          <textarea value={text} onChange={e => setText(e.target.value)} rows={2}
+            placeholder="What did the parent say? Or an internal note about the student…"
+            style={{ width: "100%", background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 8,
+              padding: "9px 12px", fontSize: 13, color: C.text, outline: "none", lineHeight: 1.6 }} />
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <input type="date" value={cDate} onChange={e => setCDate(e.target.value)}
+                style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 7, padding: "5px 9px", fontSize: 12, color: C.text, outline: "none" }} />
+              <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12, color: C.textDim }}>
+                <input type="checkbox" checked={followUp} onChange={e => setFollowUp(e.target.checked)}
+                  style={{ accentColor: C.coral, cursor: "pointer" }} />
+                Needs follow-up
+              </label>
+            </div>
+            <Btn variant="primary" small onClick={add} disabled={saving || !text.trim()}>
+              {saving ? "Saving…" : "Save Comment"}
+            </Btn>
+          </div>
+        </div>
+      )}
+
+      {comments.length === 0 ? (
+        <p style={{ fontSize: 13, color: C.muted, textAlign: "center", padding: "16px 0" }}>
+          No comments recorded yet. Log what parents tell you — it's retention gold.
+        </p>
+      ) : (
+        <div style={{ display: "grid", gap: 8 }}>
+          {comments.map(cm => {
+            const meta = COMMENT_TYPES.find(t => t.id === cm.type) || COMMENT_TYPES[3];
+            return (
+              <div key={cm.id} style={{
+                padding: "10px 12px", background: meta.bg, borderRadius: 9,
+                borderLeft: `3px solid ${meta.color}`,
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5, gap: 8 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: meta.color }}>{meta.label}</span>
+                    <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO }}>{fmtShort(cm.date)}</span>
+                    {cm.followUp && (
+                      <span style={{ fontSize: 10, fontWeight: 800, color: C.coral, background: C.surface, padding: "1px 8px", borderRadius: 99 }}>
+                        ⚠ FOLLOW UP
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                    <button onClick={() => toggleFollowUp(cm.id)} title={cm.followUp ? "Mark resolved" : "Mark needs follow-up"}
+                      style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: cm.followUp ? C.green : C.muted }}>
+                      {cm.followUp ? "✓" : "⚑"}
+                    </button>
+                    <button onClick={() => remove(cm.id)} title="Delete"
+                      style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, color: C.muted }}>×</button>
+                  </div>
+                </div>
+                <p style={{ fontSize: 13, color: C.text, lineHeight: 1.6 }}>{cm.text}</p>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Referrals Section ─────────────────────────────────────────────────────────
+function ReferralsSection({ initialData, onSave }) {
+  const [referrals, setReferrals] = useState(initialData?.referrals || []);
+  const [adding,    setAdding]    = useState(false);
+  const [saving,    setSaving]    = useState(false);
+  const [refName,   setRefName]   = useState("");
+  const [refDate,   setRefDate]   = useState(todayStr());
+
+  const persist = async (next) => {
+    setSaving(true);
+    try { await onSave({ referrals: next }); setReferrals(next); }
+    finally { setSaving(false); }
+  };
+
+  const add = async () => {
+    if (!refName.trim()) return;
+    await persist([{ id: Date.now(), name: refName.trim(), date: refDate, status: "mentioned" }, ...referrals]);
+    setRefName(""); setAdding(false);
+  };
+
+  const setStatus = (id, status) => persist(referrals.map(r => r.id === id ? { ...r, status } : r));
+  const remove    = (id) => persist(referrals.filter(r => r.id !== id));
+
+  const joined = referrals.filter(r => r.status === "joined").length;
+
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18, marginBottom: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <div>
+          <p style={{ fontFamily: MONO, fontSize: 11, color: C.purple, textTransform: "uppercase", letterSpacing: 1, fontWeight: 700 }}>
+            🔗 Referrals From This Family
+          </p>
+          {referrals.length > 0 && (
+            <p style={{ fontSize: 12, color: C.textDim, marginTop: 3 }}>
+              {referrals.length} referral{referrals.length !== 1 ? "s" : ""} · <strong style={{ color: C.green }}>{joined} joined</strong>
+            </p>
+          )}
+        </div>
+        <Btn variant="ghost" small onClick={() => setAdding(!adding)}>{adding ? "Cancel" : "+ Add"}</Btn>
+      </div>
+
+      {adding && (
+        <div style={{ background: C.bg, borderRadius: 10, padding: 14, marginBottom: 14, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <div style={{ flex: 1, minWidth: 160 }}>
+            <LightInput label="Referred family / student" value={refName} onChange={setRefName} placeholder="e.g. Yamada family" />
+          </div>
+          <input type="date" value={refDate} onChange={e => setRefDate(e.target.value)}
+            style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 7, padding: "8px 10px", fontSize: 13, color: C.text, outline: "none" }} />
+          <Btn variant="primary" small onClick={add} disabled={saving || !refName.trim()}>
+            {saving ? "Saving…" : "Save"}
+          </Btn>
+        </div>
+      )}
+
+      {referrals.length === 0 ? (
+        <p style={{ fontSize: 13, color: C.muted, textAlign: "center", padding: "12px 0" }}>
+          No referrals tracked yet. When this family mentions a friend — log it here.
+        </p>
+      ) : (
+        <div style={{ display: "grid", gap: 8 }}>
+          {referrals.map(r => (
+            <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", background: C.bg, borderRadius: 9, flexWrap: "wrap" }}>
+              <span style={{ fontWeight: 600, fontSize: 13, color: C.forest, flex: 1, minWidth: 100 }}>{r.name}</span>
+              <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO }}>{r.date}</span>
+              <div style={{ display: "flex", gap: 4 }}>
+                {REFERRAL_STATUSES.map(s => (
+                  <button key={s.id} onClick={() => setStatus(r.id, s.id)} style={{
+                    padding: "3px 10px", borderRadius: 99, fontSize: 11, fontWeight: 700, cursor: "pointer",
+                    border: `1.5px solid ${r.status === s.id ? s.color : C.border}`,
+                    background: r.status === s.id ? s.bg : "transparent",
+                    color: r.status === s.id ? s.color : C.muted,
+                  }}>{s.label}</button>
+                ))}
+              </div>
+              <button onClick={() => remove(r.id)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, color: C.muted }}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1576,6 +1970,7 @@ function StudentDetailView({ profile, allRecords, onBack }) {
   const negPct   = attended > 0 ? Math.round(profile.negative / attended * 100) : 0;
   const neuPct   = attended > 0 ? Math.round((attended - profile.positive - profile.negative - profile.flag) / attended * 100) : 0;
   const barColor = posPct >= 60 ? C.green : posPct >= 30 ? C.amber : C.coral;
+  const health   = computeStudentHealth(profile);
 
   const [studentRecord, setStudentRecord] = useState(null);
   const [recordLoading, setRecordLoading] = useState(true);
@@ -1586,12 +1981,12 @@ function StudentDetailView({ profile, allRecords, onBack }) {
       setStudentRecord(data);
       setRecordLoading(false);
     }).catch(() => {
-      setStudentRecord({ testScores: [], eikenHistory: [] });
+      setStudentRecord({ testScores: [], eikenHistory: [], parentComments: [], referrals: [], onboarding: null });
       setRecordLoading(false);
     });
   }, [profile.name]);
 
-  // Merge partial saves (test scores save independently of Eiken history)
+  // Merge partial saves (each section saves independently of the others)
   const handleRecordSave = async (partial) => {
     const merged = { ...studentRecord, ...partial };
     await saveStudentRecord(profile.name, merged);
@@ -1628,6 +2023,7 @@ function StudentDetailView({ profile, allRecords, onBack }) {
       note:      r.report?.note || "",
       mood:      r.report?.mood || "",
       engagement:r.report?.engagement || "",
+      feedbackSent: r.report?.feedbackSent || false,
     }));
 
   const fmtDateShort = (d) => new Date(d + "T12:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short" });
@@ -1663,6 +2059,17 @@ function StudentDetailView({ profile, allRecords, onBack }) {
           </div>
         </div>
 
+        {/* Health banner */}
+        <div style={{
+          display: "flex", gap: 12, alignItems: "flex-start", padding: "11px 14px",
+          background: health.bg, borderRadius: 9, border: `1.5px solid ${health.color}`, marginBottom: 14,
+        }}>
+          <span style={{ fontWeight: 800, color: health.color, fontSize: 13, whiteSpace: "nowrap" }}>
+            {HEALTH_ICON[health.level]} {health.label}
+          </span>
+          <span style={{ fontSize: 12, color: C.textMid, lineHeight: 1.5 }}>{health.reasons.join(" · ")}</span>
+        </div>
+
         {/* Progress bar */}
         <div style={{ marginBottom: 14 }}>
           <div style={{ height: 8, background: C.border, borderRadius: 99, overflow: "hidden", display: "flex" }}>
@@ -1670,7 +2077,7 @@ function StudentDetailView({ profile, allRecords, onBack }) {
             <div style={{ width: `${neuPct}%`, background: "#CBD5E1" }} />
             <div style={{ width: `${negPct}%`, background: C.coral }} />
           </div>
-          <div style={{ display: "flex", gap: 16, marginTop: 6, fontSize: 11 }}>
+          <div style={{ display: "flex", gap: 16, marginTop: 6, fontSize: 11, flexWrap: "wrap" }}>
             <span style={{ color: C.green }}>✓ {profile.positive} positive</span>
             <span style={{ color: C.muted }}>{attended - profile.positive - profile.negative - profile.flag} neutral</span>
             <span style={{ color: C.coral }}>✗ {profile.negative} concern</span>
@@ -1735,14 +2142,17 @@ function StudentDetailView({ profile, allRecords, onBack }) {
           </p>
           <div style={{ display: "grid", gap: 10 }}>
             {profile.mentions.map((m, i) => {
-              const markIcon = { positive:"✓", negative:"✗", flag:"🚩", absent:"○", none:"—" }[m.mark] || "—";
-              const markCol  = { positive: C.green, negative: C.coral, flag: C.amber, absent: C.muted, none: C.muted }[m.mark] || C.muted;
+              const markIcon2 = { positive:"✓", negative:"✗", flag:"🚩", absent:"○", none:"—" }[m.mark] || "—";
+              const markCol2  = { positive: C.green, negative: C.coral, flag: C.amber, absent: C.muted, none: C.muted }[m.mark] || C.muted;
               return (
                 <div key={i} style={{ padding: "12px 14px", background: C.purpleBg, borderRadius: 9, borderLeft: `3px solid ${C.purple}` }}>
                   {/* Header row */}
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
                     <span style={{ fontSize: 12, fontWeight: 700, color: C.purple }}>{m.className}</span>
-                    <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO }}>{fmtDateShort(m.date)}</span>
+                    <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO }}>
+                      {m.feedbackSent && <span style={{ color: C.blue, fontWeight: 700, marginRight: 6 }} title="Feedback sent to parents">✉ sent</span>}
+                      {fmtDateShort(m.date)}
+                    </span>
                   </div>
                   {/* Class ratings row */}
                   <div style={{ display: "flex", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
@@ -1762,8 +2172,8 @@ function StudentDetailView({ profile, allRecords, onBack }) {
                       </span>
                     )}
                     {/* Student's own mark that day */}
-                    <span style={{ fontSize: 11, fontWeight: 700, color: markCol, background: C.surface, borderRadius: 6, padding: "2px 8px" }}>
-                      {markIcon} {m.mark === "none" ? "No mark" : m.mark}
+                    <span style={{ fontSize: 11, fontWeight: 700, color: markCol2, background: C.surface, borderRadius: 6, padding: "2px 8px" }}>
+                      {markIcon2} {m.mark === "none" ? "No mark" : m.mark}
                     </span>
                   </div>
                   {/* The note itself */}
@@ -1775,14 +2185,26 @@ function StudentDetailView({ profile, allRecords, onBack }) {
         </div>
       )}
 
-      {/* Test scores + Eiken */}
+      {/* CS sections: onboarding, comments, referrals + scores */}
       {recordLoading ? (
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 20, background: C.surface, borderRadius: 12, marginBottom: 20 }}>
           <div className="spin" style={{ width: 20, height: 20, border: `2px solid ${C.border}`, borderTopColor: C.forest, borderRadius: "50%" }} />
-          <span style={{ fontSize: 13, color: C.muted }}>Loading scores…</span>
+          <span style={{ fontSize: 13, color: C.muted }}>Loading records…</span>
         </div>
       ) : (
         <>
+          <OnboardingSection
+            initialData={studentRecord}
+            onSave={handleRecordSave}
+          />
+          <ParentCommentsSection
+            initialData={studentRecord}
+            onSave={handleRecordSave}
+          />
+          <ReferralsSection
+            initialData={studentRecord}
+            onSave={handleRecordSave}
+          />
           <TestScoresSection
             studentName={profile.name}
             initialData={studentRecord}
@@ -1820,7 +2242,10 @@ function StudentDetailView({ profile, allRecords, onBack }) {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: entry.note ? 4 : 0 }}>
                     <span style={{ fontSize: 13, fontWeight: 600, color: C.forest }}>{entry.className}</span>
-                    <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO, flexShrink: 0, marginLeft: 8 }}>{fmtDateShort(entry.date)}</span>
+                    <span style={{ fontSize: 11, color: C.muted, fontFamily: MONO, flexShrink: 0, marginLeft: 8 }}>
+                      {entry.feedbackSent && <span style={{ color: C.blue, fontWeight: 700, marginRight: 6 }} title="Feedback sent">✉</span>}
+                      {fmtDateShort(entry.date)}
+                    </span>
                   </div>
                   {entry.note && (
                     <p style={{ fontSize: 12, color: C.textDim, lineHeight: 1.5, fontStyle: "italic" }}>"{entry.note}"</p>
@@ -1851,7 +2276,8 @@ function AnalyticsView({ weekTemplates, onClose }) {
   const [activeTab,   setActiveTab]   = useState("overview");
   const [searchName,  setSearchName]  = useState("");
   const [selectedStudent, setSelectedStudent] = useState(null);
-  const [markFilter,  setMarkFilter]  = useState("All"); // All | positive | negative | flag | absent
+  const [markFilter,  setMarkFilter]  = useState("All"); // All | positive | negative | flag | absent | mentions | health-red | health-yellow
+  const [sortBy,      setSortBy]      = useState("auto"); // auto | health | name | attendance | positive | classes
 
   const range = rangeMode === "week" ? isoWeekRange(rangeOffset)
               : rangeMode === "month" ? monthRange(rangeOffset)
@@ -1901,27 +2327,48 @@ function AnalyticsView({ weekTemplates, onClose }) {
   const students = buildStudentProfiles(filtered);
   let filteredStudents = students.filter(s => {
     if (searchName && !s.name.toLowerCase().includes(searchName.toLowerCase())) return false;
-    if (markFilter === "positive") return s.positive > 0;
-    if (markFilter === "negative") return s.negative > 0;
-    if (markFilter === "flag")     return s.flag > 0;
-    if (markFilter === "absent")   return s.absent > 0;
-    if (markFilter === "mentions") return s.mentions.length > 0;
+    if (markFilter === "positive")      return s.positive > 0;
+    if (markFilter === "negative")      return s.negative > 0;
+    if (markFilter === "flag")          return s.flag > 0;
+    if (markFilter === "absent")        return s.absent > 0;
+    if (markFilter === "mentions")      return s.mentions.length > 0;
+    if (markFilter === "health-red")    return computeStudentHealth(s).level === "red";
+    if (markFilter === "health-yellow") return computeStudentHealth(s).level === "yellow";
     return true;
   });
 
-  // When a specific filter is active, sort most → least on that metric.
-  // "All" keeps the default alphabetical order from buildStudentProfiles.
+  // Sorting. "auto" keeps the original behavior: alphabetical by default, and
+  // most → least on whichever mark filter is active. Explicit sort options
+  // override the filter-driven sort.
   const sortFieldByFilter = {
     positive: "positive",
     negative: "negative",
     flag:     "flag",
     absent:   "absent",
   };
-  if (markFilter === "mentions") {
-    filteredStudents = [...filteredStudents].sort((a, b) => b.mentions.length - a.mentions.length);
-  } else if (sortFieldByFilter[markFilter]) {
-    const field = sortFieldByFilter[markFilter];
-    filteredStudents = [...filteredStudents].sort((a, b) => b[field] - a[field]);
+  const healthRankOf = (s) => HEALTH_RANK[computeStudentHealth(s).level];
+  const attRateOf    = (s) => s.classes > 0 ? (s.classes - s.absent) / s.classes : 1;
+  const posRateOf    = (s) => { const at = s.classes - s.absent; return at > 0 ? s.positive / at : 0; };
+
+  if (sortBy === "auto") {
+    if (markFilter === "mentions") {
+      filteredStudents = [...filteredStudents].sort((a, b) => b.mentions.length - a.mentions.length);
+    } else if (markFilter === "health-red" || markFilter === "health-yellow") {
+      filteredStudents = [...filteredStudents].sort((a, b) => healthRankOf(a) - healthRankOf(b));
+    } else if (sortFieldByFilter[markFilter]) {
+      const field = sortFieldByFilter[markFilter];
+      filteredStudents = [...filteredStudents].sort((a, b) => b[field] - a[field]);
+    }
+  } else if (sortBy === "health") {
+    filteredStudents = [...filteredStudents].sort((a, b) => healthRankOf(a) - healthRankOf(b));
+  } else if (sortBy === "name") {
+    filteredStudents = [...filteredStudents].sort((a, b) => a.name.localeCompare(b.name));
+  } else if (sortBy === "attendance") {
+    filteredStudents = [...filteredStudents].sort((a, b) => attRateOf(a) - attRateOf(b));
+  } else if (sortBy === "positive") {
+    filteredStudents = [...filteredStudents].sort((a, b) => posRateOf(b) - posRateOf(a));
+  } else if (sortBy === "classes") {
+    filteredStudents = [...filteredStudents].sort((a, b) => b.classes - a.classes);
   }
 
   const Tab = ({ id, label }) => (
@@ -1988,6 +2435,7 @@ function AnalyticsView({ weekTemplates, onClose }) {
             { label: "Absences",       value: filtered.flatMap(r => Object.values(r.report?.marks || {})).filter(m => m === "absent").length, col: C.coral },
             { label: "Positive marks", value: filtered.flatMap(r => Object.values(r.report?.marks || {})).filter(m => m === "positive").length, col: C.green },
             { label: "Flags",          value: filtered.flatMap(r => Object.values(r.report?.marks || {})).filter(m => m === "flag").length, col: C.amber },
+            { label: "Feedback sent",  value: filtered.filter(r => r.report?.feedbackSent).length, col: C.blue },
           ].map(s => (
             <div key={s.label} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 14px", textAlign: "center" }}>
               <p style={{ fontFamily: SERIF, fontSize: 24, fontWeight: 700, color: s.col }}>{s.value}</p>
@@ -2084,14 +2532,23 @@ function AnalyticsView({ weekTemplates, onClose }) {
                   />
                 ) : (
                   <>
-                    {/* Search + mark filter */}
+                    {/* Search + sort + mark filter */}
                     <div style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 12 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                         <input value={searchName} onChange={e => setSearchName(e.target.value)}
                           placeholder="Search student name…"
-                          style={{ width: "100%", maxWidth: 260, background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", fontSize: 14, color: C.text, outline: "none" }}
+                          style={{ width: "100%", maxWidth: 240, background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", fontSize: 14, color: C.text, outline: "none" }}
                           onFocus={e => e.target.style.borderColor = C.forest}
                           onBlur={e => e.target.style.borderColor = C.border} />
+                        <select value={sortBy} onChange={e => setSortBy(e.target.value)}
+                          style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 10px", fontSize: 13, color: C.text, cursor: "pointer", outline: "none" }}>
+                          <option value="auto">Sort: Auto (follows filter)</option>
+                          <option value="health">Sort: Health — at-risk first</option>
+                          <option value="name">Sort: Name A–Z</option>
+                          <option value="attendance">Sort: Attendance — lowest first</option>
+                          <option value="positive">Sort: Positive % — highest first</option>
+                          <option value="classes">Sort: Most logged</option>
+                        </select>
                         <span style={{ fontSize: 12, color: C.muted }}>
                           {filteredStudents.length} student{filteredStudents.length !== 1 ? "s" : ""} · tap a card for full profile
                         </span>
@@ -2100,12 +2557,14 @@ function AnalyticsView({ weekTemplates, onClose }) {
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                         <span style={{ fontSize: 11, color: C.muted, fontWeight: 700, textTransform: "uppercase", letterSpacing: .8, marginRight: 4 }}>Filter:</span>
                         {[
-                          { id: "All",      label: "All",          bg: C.forest,  col: C.white  },
-                          { id: "positive", label: "✓ Positive",   bg: C.greenBg, col: C.green  },
-                          { id: "negative", label: "✗ Concern",    bg: C.coralBg, col: C.coral  },
-                          { id: "flag",     label: "🚩 Flagged",   bg: C.amberBg, col: C.amber  },
-                          { id: "absent",   label: "○ Absent",     bg: "#F3F4F6", col: "#6B7280" },
-                          { id: "mentions", label: "💬 Has notes", bg: C.purpleBg,col: C.purple },
+                          { id: "All",           label: "All",          bg: C.forest,  col: C.white  },
+                          { id: "health-red",    label: "🔴 At risk",   bg: C.coralBg, col: C.coral  },
+                          { id: "health-yellow", label: "🟡 Watch",     bg: C.amberBg, col: C.amber  },
+                          { id: "positive",      label: "✓ Positive",   bg: C.greenBg, col: C.green  },
+                          { id: "negative",      label: "✗ Concern",    bg: C.coralBg, col: C.coral  },
+                          { id: "flag",          label: "🚩 Flagged",   bg: C.amberBg, col: C.amber  },
+                          { id: "absent",        label: "○ Absent",     bg: "#F3F4F6", col: "#6B7280" },
+                          { id: "mentions",      label: "💬 Has notes", bg: C.purpleBg,col: C.purple },
                         ].map(f => (
                           <button key={f.id} onClick={() => setMarkFilter(f.id)} style={{
                             padding: "5px 12px", borderRadius: 99, fontSize: 12, fontWeight: 700,
