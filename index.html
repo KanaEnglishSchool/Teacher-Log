@@ -1192,7 +1192,7 @@ function MetricPie({ title, data }) {
 }
 
 // ── Student Profile Card (clickable summary) ──────────────────────────────────
-function StudentProfileCard({ profile, health, onClick }) {
+function StudentProfileCard({ profile, health, pastInfo, onClick, onMarkPast, onReactivate }) {
   const attended = profile.classes - profile.absent;
   const attPct   = profile.classes > 0 ? Math.round(attended / profile.classes * 100) : 0;
   const posPct   = attended > 0 ? Math.round(profile.positive / attended * 100) : 0;
@@ -1217,6 +1217,11 @@ function StudentProfileCard({ profile, health, onClick }) {
             </span>
           </p>
           <p style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{[...profile.classNames].join(", ")}</p>
+          {pastInfo && (
+            <p style={{ fontSize: 11, color: C.coral, marginTop: 2, fontWeight: 600 }}>
+              📦 Left {pastInfo.date || "—"}{pastInfo.reason ? ` — ${pastInfo.reason}` : ""}
+            </p>
+          )}
         </div>
         <div style={{ textAlign: "right" }}>
           <p style={{ fontFamily: MONO, fontSize: 18, fontWeight: 700, color: C.forest }}>{attPct}%</p>
@@ -1246,6 +1251,20 @@ function StudentProfileCard({ profile, health, onClick }) {
           <span style={{ fontSize: 10, color: C.purple, fontWeight: 700 }}>💬 {profile.mentions.length}</span>
         )}
       </div>
+      {(onMarkPast || onReactivate) && (
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "flex-end" }}>
+          {onMarkPast && (
+            <button onClick={e => { e.stopPropagation(); onMarkPast(); }} style={{
+              background: "none", border: "none", color: C.muted, fontSize: 11, fontWeight: 700, cursor: "pointer",
+            }}>📦 Mark as past student</button>
+          )}
+          {onReactivate && (
+            <button onClick={e => { e.stopPropagation(); onReactivate(); }} style={{
+              background: "none", border: "none", color: C.green, fontSize: 11, fontWeight: 700, cursor: "pointer",
+            }}>↩ Reactivate</button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1653,6 +1672,86 @@ function ReferralsSection({ initialData, onSave }) {
               <button onClick={() => remove(r.id)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, color: C.muted }}>×</button>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Past Student Status ───────────────────────────────────────────────────────
+// Moves a student out of regular active searches/lists while keeping every
+// piece of their history (reports, scores, comments, referrals) intact.
+function PastStatusSection({ initialData, onSave }) {
+  const isPast = initialData?.status === "past";
+  const [editing, setEditing] = useState(false);
+  const [date,    setDate]    = useState(initialData?.pastInfo?.date || todayStr());
+  const [reason,  setReason]  = useState(initialData?.pastInfo?.reason || "");
+  const [saving,  setSaving]  = useState(false);
+
+  const markPast = async () => {
+    setSaving(true);
+    try { await onSave({ status: "past", pastInfo: { date, reason: reason.trim() } }); }
+    finally { setSaving(false); setEditing(false); }
+  };
+
+  const reactivate = async () => {
+    setSaving(true);
+    // pastInfo is left in place as a historical record of when/why they left previously.
+    try { await onSave({ status: "active" }); }
+    finally { setSaving(false); }
+  };
+
+  if (isPast) {
+    return (
+      <div style={{
+        background: C.coralBg, border: `1.5px solid ${C.coral}`, borderRadius: 12,
+        padding: "14px 16px", marginBottom: 20, display: "flex", justifyContent: "space-between",
+        alignItems: "center", flexWrap: "wrap", gap: 10,
+      }}>
+        <div>
+          <p style={{ fontWeight: 800, color: C.coral, fontSize: 13 }}>📦 Past Student</p>
+          <p style={{ fontSize: 12, color: C.textMid, marginTop: 3 }}>
+            Marked past on {initialData.pastInfo?.date || "unknown date"}
+            {initialData.pastInfo?.reason ? ` — ${initialData.pastInfo.reason}` : ""}
+            {" "}· Hidden from regular searches, history preserved below.
+          </p>
+        </div>
+        <Btn variant="ghost" small onClick={reactivate} disabled={saving}>
+          {saving ? "…" : "↩ Reactivate"}
+        </Btn>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 16px", marginBottom: 20 }}>
+      {!editing ? (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+          <p style={{ fontSize: 12, color: C.muted }}>Currently an active student.</p>
+          <Btn variant="danger" small onClick={() => setEditing(true)}>📦 Mark as Past Student</Btn>
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: 12 }}>
+          <p style={{ fontSize: 12, color: C.textDim }}>
+            Moves this student out of regular searches and analytics. All their data stays saved and reachable here.
+          </p>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <div>
+              <FieldLabel>Date left</FieldLabel>
+              <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{
+                background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 7,
+                padding: "7px 10px", fontSize: 13, color: C.text, outline: "none" }} />
+            </div>
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <LightInput label="Reason (optional)" value={reason} onChange={setReason} placeholder="e.g. Moved away, switched schools" />
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <Btn variant="ghost" small onClick={() => setEditing(false)}>Cancel</Btn>
+            <Btn variant="danger" small onClick={markPast} disabled={saving}>
+              {saving ? "Saving…" : "Confirm — Mark Past"}
+            </Btn>
+          </div>
         </div>
       )}
     </div>
@@ -2092,6 +2191,11 @@ function StudentDetailView({ profile, allRecords, onBack }) {
         fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 6, marginBottom: 20,
       }}>← All Students</button>
 
+      {/* Past-student status — shown early since it changes how the rest of this page should be read */}
+      {!recordLoading && (
+        <PastStatusSection initialData={studentRecord} onSave={handleRecordSave} />
+      )}
+
       {/* Header */}
       <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "20px 22px", marginBottom: 20 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
@@ -2330,7 +2434,11 @@ function AnalyticsView({ weekTemplates, onClose }) {
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [markFilter,  setMarkFilter]  = useState("All"); // All | positive | negative | flag | absent | mentions | health-red | health-yellow
   const [sortBy,      setSortBy]      = useState("auto"); // auto | health | name | attendance | positive | classes
-  const [studentRecords, setStudentRecords] = useState({}); // name -> CS record, for procedural health checks
+  const [studentRecords, setStudentRecords] = useState({}); // name -> CS record, for procedural health checks + past status
+  const [studentView, setStudentView] = useState("active"); // active | past
+  const [allTimeRecords, setAllTimeRecords] = useState([]); // full history, independent of the date-range picker — past students need this since they may have no activity in the selected range
+
+  const refreshStudentRecords = () => loadAllStudentRecords().then(setStudentRecords).catch(() => {});
 
   const range = rangeMode === "week" ? isoWeekRange(rangeOffset)
               : rangeMode === "month" ? monthRange(rangeOffset)
@@ -2347,12 +2455,33 @@ function AnalyticsView({ weekTemplates, onClose }) {
 
   // CS records don't depend on the date range — load once.
   useEffect(() => {
-    loadAllStudentRecords().then(setStudentRecords).catch(() => setStudentRecords({}));
+    refreshStudentRecords();
+  }, []);
+
+  // Full history, loaded once, so the Past Students view can show someone who
+  // left months ago even if the main range picker is set to "This Week".
+  useEffect(() => {
+    loadAllReportsEver().then(rows => setAllTimeRecords(buildAnalyticsRecords(rows, weekTemplates))).catch(() => setAllTimeRecords([]));
   }, []);
 
   // Health lookup used throughout this view — pulls in the matching CS record
   // (onboarding/follow-up data) so procedural issues count toward the score.
   const getHealth = (s) => computeStudentHealth(s, studentRecords[s.name]);
+
+  // Quick actions from the card — full reason/date editing lives in the detail view.
+  const quickMarkPast = async (name) => {
+    const existing = studentRecords[name] || { testScores: [], eikenHistory: [], parentComments: [], referrals: [], onboarding: null };
+    const updated = { ...existing, status: "past", pastInfo: { date: todayStr(), reason: existing.pastInfo?.reason || "" } };
+    await saveStudentRecord(name, updated);
+    setStudentRecords(prev => ({ ...prev, [name]: updated }));
+  };
+  const quickReactivate = async (name) => {
+    const existing = studentRecords[name];
+    if (!existing) return;
+    const updated = { ...existing, status: "active" };
+    await saveStudentRecord(name, updated);
+    setStudentRecords(prev => ({ ...prev, [name]: updated }));
+  };
 
   const filtered = records.filter(r => {
     if (filterType  !== "All" && r.classType !== filterType)  return false;
@@ -2386,22 +2515,29 @@ function AnalyticsView({ weekTemplates, onClose }) {
     };
   }).filter(c => c.count > 0);
 
-  const students = buildStudentProfiles(filtered);
-  let filteredStudents = students.filter(s => {
-    if (searchName && !s.name.toLowerCase().includes(searchName.toLowerCase())) return false;
-    if (markFilter === "positive")      return s.positive > 0;
-    if (markFilter === "negative")      return s.negative > 0;
-    if (markFilter === "flag")          return s.flag > 0;
-    if (markFilter === "absent")        return s.absent > 0;
-    if (markFilter === "mentions")      return s.mentions.length > 0;
-    if (markFilter === "health-red")    return getHealth(s).level === "red";
-    if (markFilter === "health-yellow") return getHealth(s).level === "yellow";
-    return true;
-  });
+  const isPastRecord = (name) => studentRecords[name]?.status === "past";
+
+  const students        = buildStudentProfiles(filtered).filter(s => !isPastRecord(s.name));
+  const pastStudents     = buildStudentProfiles(allTimeRecords).filter(s => isPastRecord(s.name));
+
+  let filteredStudents = studentView === "past"
+    ? pastStudents.filter(s => !searchName || s.name.toLowerCase().includes(searchName.toLowerCase()))
+    : students.filter(s => {
+        if (searchName && !s.name.toLowerCase().includes(searchName.toLowerCase())) return false;
+        if (markFilter === "positive")      return s.positive > 0;
+        if (markFilter === "negative")      return s.negative > 0;
+        if (markFilter === "flag")          return s.flag > 0;
+        if (markFilter === "absent")        return s.absent > 0;
+        if (markFilter === "mentions")      return s.mentions.length > 0;
+        if (markFilter === "health-red")    return getHealth(s).level === "red";
+        if (markFilter === "health-yellow") return getHealth(s).level === "yellow";
+        return true;
+      });
 
   // Sorting. "auto" keeps the original behavior: alphabetical by default, and
   // most → least on whichever mark filter is active. Explicit sort options
-  // override the filter-driven sort.
+  // override the filter-driven sort. Past-student view sorts by most recently
+  // left instead — health/mark sorting doesn't apply to students who've gone.
   const sortFieldByFilter = {
     positive: "positive",
     negative: "negative",
@@ -2412,7 +2548,13 @@ function AnalyticsView({ weekTemplates, onClose }) {
   const attRateOf    = (s) => s.classes > 0 ? (s.classes - s.absent) / s.classes : 1;
   const posRateOf    = (s) => { const at = s.classes - s.absent; return at > 0 ? s.positive / at : 0; };
 
-  if (sortBy === "auto") {
+  if (studentView === "past") {
+    filteredStudents = [...filteredStudents].sort((a, b) => {
+      const da = studentRecords[a.name]?.pastInfo?.date || "";
+      const db = studentRecords[b.name]?.pastInfo?.date || "";
+      return db.localeCompare(da) || a.name.localeCompare(b.name);
+    });
+  } else if (sortBy === "auto") {
     if (markFilter === "mentions") {
       filteredStudents = [...filteredStudents].sort((a, b) => b.mentions.length - a.mentions.length);
     } else if (markFilter === "health-red" || markFilter === "health-yellow") {
@@ -2589,11 +2731,27 @@ function AnalyticsView({ weekTemplates, onClose }) {
                 {selectedStudent ? (
                   <StudentDetailView
                     profile={selectedStudent}
-                    allRecords={filtered}
-                    onBack={() => setSelectedStudent(null)}
+                    allRecords={studentView === "past" ? allTimeRecords : filtered}
+                    onBack={() => { setSelectedStudent(null); refreshStudentRecords(); }}
                   />
                 ) : (
                   <>
+                    {/* Active / Past toggle */}
+                    <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+                      <button onClick={() => { setStudentView("active"); setSearchName(""); }} style={{
+                        padding: "7px 16px", borderRadius: 8, border: "none", fontWeight: 700, fontSize: 13, cursor: "pointer",
+                        background: studentView === "active" ? C.forest : C.surface,
+                        color: studentView === "active" ? C.white : C.textDim,
+                        boxShadow: studentView === "active" ? "none" : `inset 0 0 0 1px ${C.border}`,
+                      }}>Active Students</button>
+                      <button onClick={() => { setStudentView("past"); setSearchName(""); }} style={{
+                        padding: "7px 16px", borderRadius: 8, border: "none", fontWeight: 700, fontSize: 13, cursor: "pointer",
+                        background: studentView === "past" ? C.coral : C.surface,
+                        color: studentView === "past" ? C.white : C.textDim,
+                        boxShadow: studentView === "past" ? "none" : `inset 0 0 0 1px ${C.border}`,
+                      }}>📦 Past Students ({pastStudents.length})</button>
+                    </div>
+
                     {/* Search + sort + mark filter */}
                     <div style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 12 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
@@ -2602,47 +2760,63 @@ function AnalyticsView({ weekTemplates, onClose }) {
                           style={{ width: "100%", maxWidth: 240, background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", fontSize: 14, color: C.text, outline: "none" }}
                           onFocus={e => e.target.style.borderColor = C.forest}
                           onBlur={e => e.target.style.borderColor = C.border} />
-                        <select value={sortBy} onChange={e => setSortBy(e.target.value)}
-                          style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 10px", fontSize: 13, color: C.text, cursor: "pointer", outline: "none" }}>
-                          <option value="auto">Sort: Auto (follows filter)</option>
-                          <option value="health">Sort: Health — at-risk first</option>
-                          <option value="name">Sort: Name A–Z</option>
-                          <option value="attendance">Sort: Attendance — lowest first</option>
-                          <option value="positive">Sort: Positive % — highest first</option>
-                          <option value="classes">Sort: Most logged</option>
-                        </select>
+                        {studentView === "active" && (
+                          <select value={sortBy} onChange={e => setSortBy(e.target.value)}
+                            style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 10px", fontSize: 13, color: C.text, cursor: "pointer", outline: "none" }}>
+                            <option value="auto">Sort: Auto (follows filter)</option>
+                            <option value="health">Sort: Health — at-risk first</option>
+                            <option value="name">Sort: Name A–Z</option>
+                            <option value="attendance">Sort: Attendance — lowest first</option>
+                            <option value="positive">Sort: Positive % — highest first</option>
+                            <option value="classes">Sort: Most logged</option>
+                          </select>
+                        )}
                         <span style={{ fontSize: 12, color: C.muted }}>
                           {filteredStudents.length} student{filteredStudents.length !== 1 ? "s" : ""} · tap a card for full profile
+                          {studentView === "past" && " · sorted by most recently left"}
                         </span>
                       </div>
-                      {/* Mark filter chips */}
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                        <span style={{ fontSize: 11, color: C.muted, fontWeight: 700, textTransform: "uppercase", letterSpacing: .8, marginRight: 4 }}>Filter:</span>
-                        {[
-                          { id: "All",           label: "All",          bg: C.forest,  col: C.white  },
-                          { id: "health-red",    label: "🔴 At risk",   bg: C.coralBg, col: C.coral  },
-                          { id: "health-yellow", label: "🟡 Watch",     bg: C.amberBg, col: C.amber  },
-                          { id: "positive",      label: "✓ Positive",   bg: C.greenBg, col: C.green  },
-                          { id: "negative",      label: "✗ Concern",    bg: C.coralBg, col: C.coral  },
-                          { id: "flag",          label: "🚩 Flagged",   bg: C.amberBg, col: C.amber  },
-                          { id: "absent",        label: "○ Absent",     bg: "#F3F4F6", col: "#6B7280" },
-                          { id: "mentions",      label: "💬 Has notes", bg: C.purpleBg,col: C.purple },
-                        ].map(f => (
-                          <button key={f.id} onClick={() => setMarkFilter(f.id)} style={{
-                            padding: "5px 12px", borderRadius: 99, fontSize: 12, fontWeight: 700,
-                            border: `1.5px solid ${markFilter === f.id ? f.col : C.border}`,
-                            background: markFilter === f.id ? f.bg : "transparent",
-                            color: markFilter === f.id ? f.col : C.muted,
-                            cursor: "pointer", transition: "all .15s",
-                          }}>{f.label}</button>
-                        ))}
-                      </div>
+                      {/* Mark filter chips — active students only; not meaningful for past students */}
+                      {studentView === "active" && (
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                          <span style={{ fontSize: 11, color: C.muted, fontWeight: 700, textTransform: "uppercase", letterSpacing: .8, marginRight: 4 }}>Filter:</span>
+                          {[
+                            { id: "All",           label: "All",          bg: C.forest,  col: C.white  },
+                            { id: "health-red",    label: "🔴 At risk",   bg: C.coralBg, col: C.coral  },
+                            { id: "health-yellow", label: "🟡 Watch",     bg: C.amberBg, col: C.amber  },
+                            { id: "positive",      label: "✓ Positive",   bg: C.greenBg, col: C.green  },
+                            { id: "negative",      label: "✗ Concern",    bg: C.coralBg, col: C.coral  },
+                            { id: "flag",          label: "🚩 Flagged",   bg: C.amberBg, col: C.amber  },
+                            { id: "absent",        label: "○ Absent",     bg: "#F3F4F6", col: "#6B7280" },
+                            { id: "mentions",      label: "💬 Has notes", bg: C.purpleBg,col: C.purple },
+                          ].map(f => (
+                            <button key={f.id} onClick={() => setMarkFilter(f.id)} style={{
+                              padding: "5px 12px", borderRadius: 99, fontSize: 12, fontWeight: 700,
+                              border: `1.5px solid ${markFilter === f.id ? f.col : C.border}`,
+                              background: markFilter === f.id ? f.bg : "transparent",
+                              color: markFilter === f.id ? f.col : C.muted,
+                              cursor: "pointer", transition: "all .15s",
+                            }}>{f.label}</button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
                       {filteredStudents.length === 0 ? (
-                        <p style={{ fontSize: 13, color: C.muted, padding: 16 }}>No students match this filter.</p>
+                        <p style={{ fontSize: 13, color: C.muted, padding: 16 }}>
+                          {studentView === "past" ? "No past students recorded yet." : "No students match this filter."}
+                        </p>
                       ) : filteredStudents.map(p => (
-                        <StudentProfileCard key={p.name} profile={p} health={getHealth(p)} onClick={() => setSelectedStudent(p)} />
+                        studentView === "past" ? (
+                          <StudentProfileCard key={p.name} profile={p} health={getHealth(p)}
+                            pastInfo={studentRecords[p.name]?.pastInfo}
+                            onClick={() => setSelectedStudent(p)}
+                            onReactivate={() => quickReactivate(p.name)} />
+                        ) : (
+                          <StudentProfileCard key={p.name} profile={p} health={getHealth(p)}
+                            onClick={() => setSelectedStudent(p)}
+                            onMarkPast={() => quickMarkPast(p.name)} />
+                        )
                       ))}
                     </div>
                   </>
